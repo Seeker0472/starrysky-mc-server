@@ -1,20 +1,25 @@
+mod link;
+
 use clap::Parser;
 use serialport::SerialPort;
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const SERIAL_WRITE_BACKPRESSURE_LIMIT: Duration = Duration::from_secs(1);
-const BRIDGE_RESET_FRAME: [u8; 10] = [0xff, 0x00, 0xff, b'M', b'C', b'U', b'R', b'S', b'T', 0x7e];
-const BRIDGE_RESET_SETTLE: Duration = Duration::from_millis(20);
 const DEFAULT_BAUD: u32 = 115200;
-const DEFAULT_SERIAL_WRITE_CHUNK_BYTES: usize = 1;
-const DEFAULT_SERIAL_WRITE_DELAY: Duration = Duration::from_millis(10);
+const TCP_PENDING_LIMIT: usize = 8192;
+const IO_BUF_LEN: usize = 8192;
+const TCP_READ_TIMEOUT: Duration = Duration::from_millis(1);
+const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const SERIAL_WRITE_BACKPRESSURE_LIMIT: Duration = Duration::from_secs(1);
+const LINK_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const LINK_HELLO_INTERVAL: Duration = Duration::from_millis(100);
+const CONTROL_FRAME_WRITE_CHUNK_BYTES: usize = 1;
+const CONTROL_FRAME_WRITE_DELAY: Duration = Duration::from_millis(10);
+const DATA_FRAME_WRITE_CHUNK_BYTES: usize = 1;
+const DATA_FRAME_WRITE_DELAY: Duration = Duration::from_millis(2);
 
 #[derive(Parser, Debug, Clone)]
 struct Args {
@@ -66,49 +71,25 @@ fn hex_preview(data: &[u8]) -> String {
     out
 }
 
-fn send_bridge_reset(serial: &mut dyn SerialPort, log: BridgeLog) -> io::Result<()> {
-    log.debug(format_args!("serial reset write bytes={}", BRIDGE_RESET_FRAME.len()));
-    log.debug(format_args!("serial reset data {}", hex_preview(&BRIDGE_RESET_FRAME)));
-    write_serial_all_with_retry_and_pacing(
-        serial,
-        &BRIDGE_RESET_FRAME,
-        &AtomicBool::new(false),
-        || Ok(false),
-        DEFAULT_SERIAL_WRITE_CHUNK_BYTES,
-        DEFAULT_SERIAL_WRITE_DELAY,
-        thread::sleep,
-    )?;
-    serial.flush()?;
-    thread::sleep(BRIDGE_RESET_SETTLE);
-    let _ = serial.clear(serialport::ClearBuffer::Input);
-    log.debug("serial input cleared after reset");
-    Ok(())
+fn encode_frame(frame_type: link::FrameType, seq: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+    link::encode(frame_type, seq, payload).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to encode {frame_type:?} frame"),
+        )
+    })
 }
 
-fn send_bridge_reset_from_handle(serial: &dyn SerialPort, log: BridgeLog) -> io::Result<()> {
-    let mut reset_serial = serial.try_clone()?;
-    send_bridge_reset(&mut *reset_serial, log)
-}
-
-fn write_serial_all_with_retry(
-    serial: &mut dyn SerialPort,
-    data: &[u8],
-    stop: &AtomicBool,
-    mut tcp_peer_disconnected: impl FnMut() -> io::Result<bool>,
-) -> io::Result<()> {
-    let mut offset = 0;
+fn write_frame(serial: &mut dyn SerialPort, frame: &[u8]) -> io::Result<()> {
+    let mut offset = 0usize;
     let mut backpressure_started = None;
 
-    while offset < data.len() {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        match serial.write(&data[offset..]) {
+    while offset < frame.len() {
+        match serial.write(&frame[offset..]) {
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
-                    "failed to write to serial port",
+                    "failed to write link frame",
                 ));
             }
             Ok(n) => {
@@ -118,7 +99,7 @@ fn write_serial_all_with_retry(
             Err(ref e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
                 let blocked_since = *backpressure_started.get_or_insert_with(Instant::now);
@@ -128,24 +109,17 @@ fn write_serial_all_with_retry(
                         "serial write backpressure limit exceeded",
                     ));
                 }
-                if stop.load(Ordering::Relaxed) || tcp_peer_disconnected()? {
-                    stop.store(true, Ordering::Relaxed);
-                    return Ok(());
-                }
                 thread::sleep(Duration::from_millis(1));
             }
             Err(e) => return Err(e),
         }
     }
-
-    Ok(())
+    serial.flush()
 }
 
-fn write_serial_all_with_retry_and_pacing(
+fn write_frame_paced(
     serial: &mut dyn SerialPort,
-    data: &[u8],
-    stop: &AtomicBool,
-    mut tcp_peer_disconnected: impl FnMut() -> io::Result<bool>,
+    frame: &[u8],
     chunk_bytes: usize,
     delay: Duration,
     mut sleep: impl FnMut(Duration),
@@ -153,14 +127,11 @@ fn write_serial_all_with_retry_and_pacing(
     let chunk_bytes = chunk_bytes.max(1);
     let mut offset = 0usize;
 
-    while offset < data.len() {
-        let end = (offset + chunk_bytes).min(data.len());
-        write_serial_all_with_retry(serial, &data[offset..end], stop, || {
-            tcp_peer_disconnected()
-        })?;
+    while offset < frame.len() {
+        let end = (offset + chunk_bytes).min(frame.len());
+        write_frame(serial, &frame[offset..end])?;
         offset = end;
-
-        if offset < data.len() && !stop.load(Ordering::Relaxed) && !delay.is_zero() {
+        if offset < frame.len() && !delay.is_zero() {
             sleep(delay);
         }
     }
@@ -168,71 +139,186 @@ fn write_serial_all_with_retry_and_pacing(
     Ok(())
 }
 
-fn tcp_peer_disconnected(tcp: &TcpStream) -> io::Result<bool> {
-    let mut buf = [0u8; 1];
-
-    match tcp.peek(&mut buf) {
-        Ok(0) => Ok(true),
-        Ok(_) => Ok(false),
-        Err(ref e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(ref e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::NotConnected
-                    | io::ErrorKind::BrokenPipe
-            ) =>
-        {
-            Ok(true)
-        }
-        Err(e) => Err(e),
-    }
+fn write_control_frame(serial: &mut dyn SerialPort, frame: &[u8]) -> io::Result<()> {
+    write_frame_paced(
+        serial,
+        frame,
+        CONTROL_FRAME_WRITE_CHUNK_BYTES,
+        CONTROL_FRAME_WRITE_DELAY,
+        thread::sleep,
+    )
 }
 
-fn copy_tcp_to_serial(
-    mut tcp: TcpStream,
-    mut serial: Box<dyn SerialPort>,
-    stop: Arc<AtomicBool>,
-    log: BridgeLog,
+fn write_data_frame_paced(
+    serial: &mut dyn SerialPort,
+    frame: &[u8],
+    sleep: impl FnMut(Duration),
 ) -> io::Result<()> {
-    tcp.set_read_timeout(Some(Duration::from_millis(1)))?;
+    write_frame_paced(
+        serial,
+        frame,
+        DATA_FRAME_WRITE_CHUNK_BYTES,
+        DATA_FRAME_WRITE_DELAY,
+        sleep,
+    )
+}
 
-    let mut buf = [0u8; 8192];
-    let mut total = 0usize;
-    let result = loop {
-        if stop.load(Ordering::Relaxed) {
-            break Ok(());
+fn send_link_reset(serial: &mut dyn SerialPort, log: BridgeLog) -> io::Result<()> {
+    let frame = encode_frame(link::FrameType::Reset, 0, &[])?;
+    log.debug(format_args!("link reset write bytes={}", frame.len()));
+    log.debug(format_args!("link reset data {}", hex_preview(&frame)));
+    write_control_frame(serial, &frame)
+}
+
+fn accept_m2c_sequence(frame: &link::Frame, expected: &mut u8, log: BridgeLog) -> bool {
+    if frame.seq != *expected {
+        log.info(format_args!(
+            "DATA_M2C sequence mismatch expected={} got={}",
+            *expected, frame.seq
+        ));
+        return false;
+    }
+    *expected = expected.wrapping_add(1);
+    true
+}
+
+fn frame_tcp_payload_with_credit(
+    input: &[u8],
+    negotiated_payload: usize,
+    credit: &mut u16,
+    seq: &mut u8,
+) -> Vec<Vec<u8>> {
+    let payload_cap = negotiated_payload.max(1).min(link::FIRMWARE_PAYLOAD_CAP);
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < input.len() && *credit > 0 {
+        let allowed = payload_cap.min(*credit as usize).min(input.len() - offset);
+        if allowed == 0 {
+            break;
+        }
+        let end = offset + allowed;
+        let frame = link::encode(link::FrameType::DataC2m, *seq, &input[offset..end])
+            .expect("payload cap guarantees DATA_C2M encodes");
+        frames.push(frame);
+        *credit -= allowed as u16;
+        *seq = seq.wrapping_add(1);
+        offset = end;
+    }
+
+    frames
+}
+
+fn configure_tcp_stream(tcp: &TcpStream) -> io::Result<()> {
+    tcp.set_read_timeout(Some(TCP_READ_TIMEOUT))?;
+    tcp.set_write_timeout(Some(TCP_WRITE_TIMEOUT))
+}
+
+fn normalize_ready(payload: u16, credit: u16) -> Option<(usize, u16)> {
+    if payload == 0 || credit == 0 {
+        return None;
+    }
+    Some((
+        usize::from(payload).min(link::FIRMWARE_PAYLOAD_CAP),
+        credit.min(link::INITIAL_CREDIT),
+    ))
+}
+
+fn apply_link_credit(credit: &mut u16, credit_cap: u16, delta: u16) {
+    *credit = credit.saturating_add(delta).min(credit_cap);
+}
+
+fn apply_link_ready_state(
+    payload: u16,
+    ready_credit: u16,
+    negotiated_payload: &mut usize,
+    credit: &mut u16,
+    credit_cap: &mut u16,
+    c2m_seq: &mut u8,
+    m2c_seq_expected: &mut u8,
+    pending_tcp: &mut VecDeque<u8>,
+) -> bool {
+    let Some((new_payload, new_credit)) = normalize_ready(payload, ready_credit) else {
+        return false;
+    };
+    *negotiated_payload = new_payload;
+    *credit = new_credit;
+    *credit_cap = new_credit;
+    *c2m_seq = 0;
+    *m2c_seq_expected = 0;
+    pending_tcp.clear();
+    true
+}
+
+fn wait_for_ready(serial: &mut dyn SerialPort, log: BridgeLog) -> io::Result<(usize, u16)> {
+    let hello_payload =
+        link::hello_payload(link::DEFAULT_PAYLOAD as u16, link::INITIAL_CREDIT);
+    let hello = encode_frame(link::FrameType::Hello, 0, &hello_payload)?;
+    let start = Instant::now();
+    let mut last_hello = None;
+    let mut decoder = link::Decoder::new();
+    let mut buf = [0u8; IO_BUF_LEN];
+
+    while start.elapsed() < LINK_READY_TIMEOUT {
+        if last_hello
+            .map(|sent: Instant| sent.elapsed() >= LINK_HELLO_INTERVAL)
+            .unwrap_or(true)
+        {
+            log.debug(format_args!("link hello write bytes={}", hello.len()));
+            log.debug(format_args!("link hello data {}", hex_preview(&hello)));
+            write_control_frame(serial, &hello)?;
+            last_hello = Some(Instant::now());
         }
 
-        match tcp.read(&mut buf) {
-            Ok(0) => {
-                log.debug(format_args!("tcp->serial eof total={total}"));
-                break Ok(());
-            }
+        match serial.read(&mut buf) {
+            Ok(0) => thread::sleep(Duration::from_millis(1)),
             Ok(n) => {
-                total += n;
-                log.debug(format_args!("tcp->serial read bytes={n} total={total}"));
-                log.debug(format_args!("tcp->serial data {}", hex_preview(&buf[..n])));
-                if let Err(e) = write_serial_all_with_retry_and_pacing(
-                    &mut *serial,
-                    &buf[..n],
-                    &stop,
-                    || tcp_peer_disconnected(&tcp),
-                    DEFAULT_SERIAL_WRITE_CHUNK_BYTES,
-                    DEFAULT_SERIAL_WRITE_DELAY,
-                    thread::sleep,
-                ) {
-                    break Err(e);
+                log.debug(format_args!("link wait read bytes={n}"));
+                for frame in decoder.feed(&buf[..n]) {
+                    match frame.frame_type {
+                        link::FrameType::Ready => {
+                            let Some((payload, credit)) = link::parse_ready(&frame.payload) else {
+                                log.info(format_args!(
+                                    "link READY with invalid payload {}",
+                                    hex_preview(&frame.payload)
+                                ));
+                                continue;
+                            };
+                            let Some((negotiated_payload, credit)) =
+                                normalize_ready(payload, credit)
+                            else {
+                                log.info(format_args!(
+                                    "link READY with invalid values payload={} credit={}",
+                                    payload, credit
+                                ));
+                                continue;
+                            };
+                            log.info(format_args!(
+                                "link ready payload={negotiated_payload} credit={credit}"
+                            ));
+                            return Ok((negotiated_payload, credit));
+                        }
+                        link::FrameType::ResetAck => {
+                            log.debug("link reset ack while waiting for ready");
+                        }
+                        link::FrameType::Error => {
+                            log.info(format_args!(
+                                "link error while waiting for ready payload={}",
+                                hex_preview(&frame.payload)
+                            ));
+                        }
+                        link::FrameType::Unknown(raw) => {
+                            log.info(format_args!(
+                                "link unknown frame type=0x{raw:02x} while waiting for ready"
+                            ));
+                        }
+                        other => {
+                            log.debug(format_args!(
+                                "link ignored {other:?} while waiting for ready"
+                            ));
+                        }
+                    }
                 }
-                log.debug(format_args!("tcp->serial wrote bytes={n} total={total}"));
             }
             Err(ref e)
                 if matches!(
@@ -240,69 +326,220 @@ fn copy_tcp_to_serial(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                thread::sleep(Duration::from_millis(1))
-            }
-            Err(e) => break Err(e),
-        }
-    };
-
-    stop.store(true, Ordering::Relaxed);
-    let _ = tcp.shutdown(Shutdown::Both);
-    result
-}
-
-fn copy_serial_to_tcp(
-    mut serial: Box<dyn SerialPort>,
-    mut tcp: TcpStream,
-    stop: Arc<AtomicBool>,
-    log: BridgeLog,
-) -> io::Result<()> {
-    let mut buf = [0u8; 8192];
-    let mut total = 0usize;
-    let result = loop {
-        if stop.load(Ordering::Relaxed) {
-            break Ok(());
-        }
-
-        match serial.read(&mut buf) {
-            Ok(0) => thread::sleep(Duration::from_millis(1)),
-            Ok(n) => {
-                total += n;
-                log.debug(format_args!("serial->tcp read bytes={n} total={total}"));
-                log.debug(format_args!("serial->tcp data {}", hex_preview(&buf[..n])));
-                if let Err(e) = tcp.write_all(&buf[..n]) {
-                    break Err(e);
-                }
-                log.debug(format_args!("serial->tcp wrote bytes={n} total={total}"));
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                if stop.load(Ordering::Relaxed) {
-                    break Ok(());
-                }
                 thread::sleep(Duration::from_millis(1));
             }
-            Err(e) => break Err(e),
+            Err(e) => return Err(e),
         }
-    };
+    }
 
-    stop.store(true, Ordering::Relaxed);
-    let _ = tcp.shutdown(Shutdown::Both);
-    result
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "timed out waiting for link READY",
+    ))
 }
 
-fn log_copy_result(direction: &str, result: thread::Result<io::Result<()>>) {
-    match result {
-        Ok(Ok(())) => eprintln!("{direction} copy stopped"),
-        Ok(Err(e)) => eprintln!("{direction} copy error: {e}"),
-        Err(panic) => {
-            if let Some(message) = panic.downcast_ref::<&str>() {
-                eprintln!("{direction} copy panicked: {message}");
-            } else if let Some(message) = panic.downcast_ref::<String>() {
-                eprintln!("{direction} copy panicked: {message}");
-            } else {
-                eprintln!("{direction} copy panicked");
+fn run_link_client(
+    mut tcp: TcpStream,
+    serial: &mut dyn SerialPort,
+    log: BridgeLog,
+) -> io::Result<()> {
+    configure_tcp_stream(&tcp)?;
+
+    send_link_reset(serial, log)?;
+    let (mut negotiated_payload, mut credit) = wait_for_ready(serial, log)?;
+    let mut credit_cap = credit;
+    let mut decoder = link::Decoder::new();
+    let mut pending_tcp = VecDeque::new();
+    let mut c2m_seq = 0u8;
+    let mut m2c_seq_expected = 0u8;
+    let mut tcp_buf = [0u8; IO_BUF_LEN];
+    let mut serial_buf = [0u8; IO_BUF_LEN];
+    let mut tcp_read_total = 0usize;
+    let mut tcp_to_serial_total = 0usize;
+    let mut serial_to_tcp_total = 0usize;
+
+    loop {
+        if pending_tcp.len() < TCP_PENDING_LIMIT {
+            let read_cap = (TCP_PENDING_LIMIT - pending_tcp.len()).min(tcp_buf.len());
+            match tcp.read(&mut tcp_buf[..read_cap]) {
+                Ok(0) => {
+                    log.debug(format_args!("tcp eof total={tcp_to_serial_total}"));
+                    let _ = send_link_reset(serial, log);
+                    return Ok(());
+                }
+                Ok(n) => {
+                    tcp_read_total += n;
+                    pending_tcp.extend(&tcp_buf[..n]);
+                    log.debug(format_args!(
+                        "tcp read bytes={n} pending={} total_in={}",
+                        pending_tcp.len(),
+                        tcp_read_total
+                    ));
+                }
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => {
+                    let _ = send_link_reset(serial, log);
+                    return Err(e);
+                }
             }
         }
+
+        while credit > 0 && !pending_tcp.is_empty() {
+            let chunk_len = pending_tcp.len().min(credit as usize);
+            let chunk: Vec<u8> = pending_tcp.iter().take(chunk_len).copied().collect();
+            let frames = frame_tcp_payload_with_credit(
+                &chunk,
+                negotiated_payload,
+                &mut credit,
+                &mut c2m_seq,
+            );
+
+            if frames.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "credit available but no DATA_C2M frame was produced",
+                ));
+            }
+
+            for frame in frames {
+                let payload_len = u16::from_le_bytes([frame[4], frame[5]]) as usize;
+                if let Err(e) = write_data_frame_paced(serial, &frame, thread::sleep) {
+                    let _ = send_link_reset(serial, log);
+                    return Err(e);
+                }
+                for _ in 0..payload_len {
+                    pending_tcp.pop_front();
+                }
+                tcp_to_serial_total += payload_len;
+                log.debug(format_args!(
+                    "DATA_C2M wrote bytes={payload_len} credit={credit} total={tcp_to_serial_total}"
+                ));
+            }
+        }
+
+        match serial.read(&mut serial_buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                log.debug(format_args!("serial link read bytes={n}"));
+                for frame in decoder.feed(&serial_buf[..n]) {
+                    match frame.frame_type {
+                        link::FrameType::DataM2c => {
+                            if !accept_m2c_sequence(&frame, &mut m2c_seq_expected, log) {
+                                send_link_reset(serial, log)?;
+                                let ready = wait_for_ready(serial, log)?;
+                                negotiated_payload = ready.0;
+                                credit = ready.1;
+                                credit_cap = ready.1;
+                                c2m_seq = 0;
+                                m2c_seq_expected = 0;
+                                pending_tcp.clear();
+                                continue;
+                            }
+                            if let Err(e) = tcp.write_all(&frame.payload) {
+                                let _ = send_link_reset(serial, log);
+                                return Err(e);
+                            }
+                            serial_to_tcp_total += frame.payload.len();
+                            log.debug(format_args!(
+                                "DATA_M2C wrote tcp bytes={} total={serial_to_tcp_total}",
+                                frame.payload.len()
+                            ));
+                        }
+                        link::FrameType::Credit => {
+                            if let Some(additional) = link::parse_credit(&frame.payload) {
+                                apply_link_credit(&mut credit, credit_cap, additional);
+                                log.debug(format_args!(
+                                    "link credit add={additional} available={credit}"
+                                ));
+                            } else {
+                                log.info(format_args!(
+                                    "link CREDIT with invalid payload {}",
+                                    hex_preview(&frame.payload)
+                                ));
+                            }
+                        }
+                        link::FrameType::Ready => {
+                            if let Some((payload, ready_credit)) =
+                                link::parse_ready(&frame.payload)
+                            {
+                                if apply_link_ready_state(
+                                    payload,
+                                    ready_credit,
+                                    &mut negotiated_payload,
+                                    &mut credit,
+                                    &mut credit_cap,
+                                    &mut c2m_seq,
+                                    &mut m2c_seq_expected,
+                                    &mut pending_tcp,
+                                ) {
+                                    log.info(format_args!(
+                                        "link ready update payload={negotiated_payload} credit={credit}"
+                                    ));
+                                } else {
+                                    log.info(format_args!(
+                                        "link READY with invalid values payload={} credit={}",
+                                        payload, ready_credit
+                                    ));
+                                }
+                            } else {
+                                log.info(format_args!(
+                                    "link READY with invalid payload {}",
+                                    hex_preview(&frame.payload)
+                                ));
+                            }
+                        }
+                        link::FrameType::ResetAck => {
+                            log.debug("link reset ack");
+                        }
+                        link::FrameType::Error => {
+                            log.info(format_args!(
+                                "link ERROR payload={}",
+                                hex_preview(&frame.payload)
+                            ));
+                            let ready = wait_for_ready(serial, log)?;
+                            negotiated_payload = ready.0;
+                            credit = ready.1;
+                            credit_cap = ready.1;
+                            c2m_seq = 0;
+                            m2c_seq_expected = 0;
+                            pending_tcp.clear();
+                        }
+                        link::FrameType::Ping => {
+                            let pong =
+                                encode_frame(link::FrameType::Pong, frame.seq, &frame.payload)?;
+                            write_frame(serial, &pong)?;
+                            log.debug("link ping -> pong");
+                        }
+                        link::FrameType::Unknown(raw) => {
+                            log.info(format_args!(
+                                "link unknown frame type=0x{raw:02x} seq={} payload={}",
+                                frame.seq,
+                                hex_preview(&frame.payload)
+                            ));
+                        }
+                        other => {
+                            log.debug(format_args!(
+                                "link ignored frame {other:?} seq={} payload={}",
+                                frame.seq,
+                                hex_preview(&frame.payload)
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => return Err(e),
+        }
+
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -314,16 +551,11 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(&args.listen)?;
     log.info(format_args!("listening on {}", args.listen));
     log.info(format_args!("serial {} at {}", args.serial, args.baud));
-    log.info(format_args!(
-        "serial write pacing chunk={} delay_ms={}",
-        DEFAULT_SERIAL_WRITE_CHUNK_BYTES,
-        DEFAULT_SERIAL_WRITE_DELAY.as_millis()
-    ));
-    let serial = serialport::new(&args.serial, args.baud)
+    let mut serial = serialport::new(&args.serial, args.baud)
         .timeout(Duration::from_millis(1))
         .open()?;
     log.debug("serial opened");
-    send_bridge_reset_from_handle(&*serial, log)?;
+    let _ = wait_for_ready(&mut *serial, log)?;
 
     for stream in listener.incoming() {
         let stream = stream?;
@@ -331,24 +563,10 @@ fn main() -> io::Result<()> {
         let peer = stream.peer_addr().ok();
         log.info(format_args!("client connected peer={peer:?}"));
 
-        let serial_a = serial.try_clone()?;
-        let serial_b = serial_a.try_clone()?;
-
-        let tcp_a = stream.try_clone()?;
-        let tcp_b = stream;
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let stop_a = Arc::clone(&stop);
-        let log_a = log;
-        let t1 = thread::spawn(move || copy_tcp_to_serial(tcp_a, serial_a, stop_a, log_a));
-        let stop_b = Arc::clone(&stop);
-        let log_b = log;
-        let t2 = thread::spawn(move || copy_serial_to_tcp(serial_b, tcp_b, stop_b, log_b));
-
-        log_copy_result("tcp-to-serial", t1.join());
-        log_copy_result("serial-to-tcp", t2.join());
-        log.info("client disconnected");
-        send_bridge_reset_from_handle(&*serial, log)?;
+        match run_link_client(stream, &mut *serial, log) {
+            Ok(()) => log.info("client disconnected"),
+            Err(e) => log.info(format_args!("client link session error: {e}")),
+        }
     }
 
     Ok(())
@@ -363,11 +581,11 @@ mod tests {
     enum WriteAction {
         Write(usize),
         Error(io::ErrorKind),
-        ErrorForever(io::ErrorKind),
     }
 
     struct FakeSerialPort {
         actions: VecDeque<WriteAction>,
+        readable: VecDeque<u8>,
         written: Vec<u8>,
     }
 
@@ -375,14 +593,28 @@ mod tests {
         fn new(actions: impl IntoIterator<Item = WriteAction>) -> Self {
             Self {
                 actions: actions.into_iter().collect(),
+                readable: VecDeque::new(),
                 written: Vec::new(),
             }
+        }
+
+        fn with_readable(mut self, readable: impl IntoIterator<Item = u8>) -> Self {
+            self.readable = readable.into_iter().collect();
+            self
         }
     }
 
     impl Read for FakeSerialPort {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::WouldBlock, "not readable"))
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.readable.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "not readable"));
+            }
+
+            let n = buf.len().min(self.readable.len());
+            for slot in &mut buf[..n] {
+                *slot = self.readable.pop_front().unwrap();
+            }
+            Ok(n)
         }
     }
 
@@ -399,10 +631,6 @@ mod tests {
                     Ok(n)
                 }
                 WriteAction::Error(kind) => Err(io::Error::new(kind, "write blocked")),
-                WriteAction::ErrorForever(kind) => {
-                    self.actions.push_front(WriteAction::ErrorForever(kind));
-                    Err(io::Error::new(kind, "write blocked"))
-                }
             }
         }
 
@@ -559,134 +787,238 @@ mod tests {
     }
 
     #[test]
-    fn send_bridge_reset_writes_magic_frame() {
-        let mut serial = FakeSerialPort::new(BRIDGE_RESET_FRAME.map(|_| WriteAction::Write(1)));
-        let log = BridgeLog { verbose: false };
+    fn link_credit_splits_tcp_payload_and_subtracts_credit() {
+        let mut credit = 100u16;
+        let mut seq = 0u8;
 
-        send_bridge_reset(&mut serial, log).unwrap();
+        let frames =
+            frame_tcp_payload_with_credit(&vec![0xaa; 150], 64, &mut credit, &mut seq);
 
-        assert_eq!(serial.written, BRIDGE_RESET_FRAME);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0][2], link::FrameType::DataC2m.to_u8());
+        assert_eq!(u16::from_le_bytes([frames[0][4], frames[0][5]]), 64);
+        assert_eq!(u16::from_le_bytes([frames[1][4], frames[1][5]]), 36);
+        assert_eq!(credit, 0);
+        assert_eq!(seq, 2);
     }
 
     #[test]
-    fn serial_write_retries_timeouts_after_partial_progress_without_duplicates() {
-        let stop = AtomicBool::new(false);
+    fn link_credit_caps_frame_payload_to_available_credit_bytes() {
+        let mut credit = 2u16;
+        let mut seq = 250u8;
+
+        let frames = frame_tcp_payload_with_credit(b"abcdef", 64, &mut credit, &mut seq);
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0][2], link::FrameType::DataC2m.to_u8());
+        assert_eq!(frames[0][3], 250);
+        assert_eq!(u16::from_le_bytes([frames[0][4], frames[0][5]]), 2);
+        assert_eq!(&frames[0][6..8], b"ab");
+        assert_eq!(credit, 0);
+        assert_eq!(seq, 251);
+    }
+
+    #[test]
+    fn link_credit_does_not_frame_when_zero() {
+        let mut credit = 0u16;
+        let mut seq = 7u8;
+
+        let frames = frame_tcp_payload_with_credit(b"abc", 64, &mut credit, &mut seq);
+
+        assert!(frames.is_empty());
+        assert_eq!(credit, 0);
+        assert_eq!(seq, 7);
+    }
+
+    #[test]
+    fn normalize_ready_rejects_zero_payload_or_credit() {
+        assert!(normalize_ready(0, 512).is_none());
+        assert!(normalize_ready(64, 0).is_none());
+    }
+
+    #[test]
+    fn link_ready_state_restarts_sequence_and_clears_pending_tcp() {
+        let mut negotiated_payload = 32usize;
+        let mut credit = 4u16;
+        let mut credit_cap = 4u16;
+        let mut c2m_seq = 9u8;
+        let mut m2c_seq_expected = 7u8;
+        let mut pending_tcp = VecDeque::from([1u8, 2, 3]);
+
+        assert!(apply_link_ready_state(
+            128,
+            300,
+            &mut negotiated_payload,
+            &mut credit,
+            &mut credit_cap,
+            &mut c2m_seq,
+            &mut m2c_seq_expected,
+            &mut pending_tcp,
+        ));
+
+        assert_eq!(negotiated_payload, 128);
+        assert_eq!(credit, 300);
+        assert_eq!(credit_cap, 300);
+        assert_eq!(c2m_seq, 0);
+        assert_eq!(m2c_seq_expected, 0);
+        assert!(pending_tcp.is_empty());
+    }
+
+    #[test]
+    fn link_ready_state_restarts_m2c_sequence() {
+        let mut negotiated_payload = 32usize;
+        let mut credit = 4u16;
+        let mut credit_cap = 4u16;
+        let mut c2m_seq = 9u8;
+        let mut m2c_seq_expected = 17u8;
+        let mut pending_tcp = VecDeque::from([1u8, 2, 3]);
+
+        assert!(apply_link_ready_state(
+            128,
+            300,
+            &mut negotiated_payload,
+            &mut credit,
+            &mut credit_cap,
+            &mut c2m_seq,
+            &mut m2c_seq_expected,
+            &mut pending_tcp,
+        ));
+
+        assert_eq!(m2c_seq_expected, 0);
+    }
+
+    #[test]
+    fn m2c_sequence_rejects_duplicate_without_advancing() {
+        let log = BridgeLog { verbose: false };
+        let mut expected = 1u8;
+        let frame = link::Frame {
+            frame_type: link::FrameType::DataM2c,
+            seq: 0,
+            payload: b"stale".to_vec(),
+        };
+
+        assert!(!accept_m2c_sequence(&frame, &mut expected, log));
+        assert_eq!(expected, 1);
+    }
+
+    #[test]
+    fn m2c_sequence_accepts_expected_and_wraps() {
+        let log = BridgeLog { verbose: false };
+        let mut expected = 255u8;
+        let frame = link::Frame {
+            frame_type: link::FrameType::DataM2c,
+            seq: 255,
+            payload: b"ok".to_vec(),
+        };
+
+        assert!(accept_m2c_sequence(&frame, &mut expected, log));
+        assert_eq!(expected, 0);
+    }
+
+    #[test]
+    fn link_credit_is_capped_to_negotiated_credit() {
+        let mut credit = 90u16;
+
+        apply_link_credit(&mut credit, 100, 50);
+
+        assert_eq!(credit, 100);
+    }
+
+    #[test]
+    fn configure_tcp_stream_sets_read_and_write_timeouts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+
+        configure_tcp_stream(&server).unwrap();
+
+        let read_timeout = server.read_timeout().unwrap().unwrap();
+        let write_timeout = server.write_timeout().unwrap().unwrap();
+        assert!(read_timeout >= TCP_READ_TIMEOUT);
+        assert!(read_timeout <= Duration::from_millis(20));
+        assert!(write_timeout >= TCP_WRITE_TIMEOUT);
+        assert!(write_timeout <= TCP_WRITE_TIMEOUT + Duration::from_millis(20));
+        drop(client);
+    }
+
+    #[test]
+    fn write_frame_retries_timeout_after_partial_progress() {
+        let frame = link::encode(link::FrameType::Ping, 4, b"abc").unwrap();
         let mut serial = FakeSerialPort::new([
             WriteAction::Write(2),
             WriteAction::Error(io::ErrorKind::TimedOut),
-            WriteAction::Write(1),
-            WriteAction::Error(io::ErrorKind::WouldBlock),
-            WriteAction::Write(2),
+            WriteAction::Write(usize::MAX),
         ]);
 
-        write_serial_all_with_retry(&mut serial, b"abcde", &stop, || Ok(false)).unwrap();
+        write_frame(&mut serial, &frame).unwrap();
 
-        assert_eq!(serial.written, b"abcde");
+        assert_eq!(serial.written, frame);
     }
 
     #[test]
-    fn serial_write_paces_trace_firmware_one_byte_at_a_time() {
+    fn control_frame_write_paces_one_byte_at_a_time() {
         use std::cell::RefCell;
 
-        let stop = AtomicBool::new(false);
-        let mut serial = FakeSerialPort::new([
-            WriteAction::Write(1),
-            WriteAction::Write(1),
-            WriteAction::Write(1),
-        ]);
+        let frame =
+            link::encode(link::FrameType::Hello, 0, &[link::VERSION, 0, 2, 0, 2]).unwrap();
+        let mut serial = FakeSerialPort::new(frame.iter().map(|_| WriteAction::Write(1)));
         let sleeps = RefCell::new(Vec::new());
 
-        write_serial_all_with_retry_and_pacing(
+        write_frame_paced(
             &mut serial,
-            b"abc",
-            &stop,
-            || Ok(false),
-            DEFAULT_SERIAL_WRITE_CHUNK_BYTES,
-            DEFAULT_SERIAL_WRITE_DELAY,
+            &frame,
+            CONTROL_FRAME_WRITE_CHUNK_BYTES,
+            CONTROL_FRAME_WRITE_DELAY,
             |delay| sleeps.borrow_mut().push(delay),
         )
         .unwrap();
 
-        assert_eq!(serial.written, b"abc");
-        assert_eq!(
-            sleeps.into_inner(),
-            vec![DEFAULT_SERIAL_WRITE_DELAY, DEFAULT_SERIAL_WRITE_DELAY]
-        );
+        assert_eq!(serial.written, frame);
+        assert_eq!(sleeps.into_inner().len(), frame.len() - 1);
     }
 
     #[test]
-    fn serial_write_returns_write_zero_on_zero_length_progress() {
-        let stop = AtomicBool::new(false);
-        let mut serial = FakeSerialPort::new([WriteAction::Write(0)]);
+    fn data_frame_write_paces_one_byte_at_a_time() {
+        use std::cell::RefCell;
 
-        let err = write_serial_all_with_retry(&mut serial, b"a", &stop, || Ok(false)).unwrap_err();
+        let frame = link::encode(link::FrameType::DataC2m, 0, b"login").unwrap();
+        let mut serial = FakeSerialPort::new(frame.iter().map(|_| WriteAction::Write(1)));
+        let sleeps = RefCell::new(Vec::new());
 
-        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        write_data_frame_paced(&mut serial, &frame, |delay| sleeps.borrow_mut().push(delay))
+            .unwrap();
+
+        assert_eq!(serial.written, frame);
+        assert_eq!(sleeps.into_inner().len(), frame.len() - 1);
     }
 
     #[test]
-    fn tcp_to_serial_stops_retrying_serial_write_after_tcp_peer_disconnects() {
-        use std::net::TcpListener;
-        use std::sync::mpsc;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut client = TcpStream::connect(addr).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let serial = Box::new(FakeSerialPort::new([
-            WriteAction::Write(1),
-            WriteAction::ErrorForever(io::ErrorKind::TimedOut),
-        ]));
-        let (done_tx, done_rx) = mpsc::channel();
+    fn send_link_reset_writes_reset_frame() {
+        let frame = link::encode(link::FrameType::Reset, 0, &[]).unwrap();
+        let mut serial = FakeSerialPort::new(frame.iter().map(|_| WriteAction::Write(1)));
         let log = BridgeLog { verbose: false };
 
-        let worker_stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            let result = copy_tcp_to_serial(server, serial, worker_stop, log);
-            done_tx.send(result).unwrap();
-        });
+        send_link_reset(&mut serial, log).unwrap();
 
-        client.write_all(b"abc").unwrap();
-        drop(client);
-
-        let result = done_rx
-            .recv_timeout(Duration::from_millis(250))
-            .expect("tcp-to-serial thread did not stop after peer disconnect");
-        result.unwrap();
-        assert!(stop.load(Ordering::Relaxed));
+        let mut decoder = link::Decoder::new();
+        let frames = decoder.feed(&serial.written);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].frame_type, link::FrameType::Reset);
+        assert!(frames[0].payload.is_empty());
     }
 
     #[test]
-    fn tcp_to_serial_stops_when_peer_closes_with_buffered_tcp_data_and_serial_stays_blocked() {
-        use std::net::TcpListener;
-        use std::sync::mpsc;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut client = TcpStream::connect(addr).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let serial = Box::new(FakeSerialPort::new([
-            WriteAction::Write(16),
-            WriteAction::ErrorForever(io::ErrorKind::TimedOut),
-        ]));
-        let (done_tx, done_rx) = mpsc::channel();
+    fn wait_for_ready_accepts_ready_frame() {
+        let ready =
+            link::encode(link::FrameType::Ready, 0, &[link::VERSION, 0, 2, 0, 2]).unwrap();
+        let mut serial = FakeSerialPort::new([]).with_readable(ready);
         let log = BridgeLog { verbose: false };
 
-        let worker_stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            let result = copy_tcp_to_serial(server, serial, worker_stop, log);
-            done_tx.send(result).unwrap();
-        });
+        let (payload, credit) = wait_for_ready(&mut serial, log).unwrap();
 
-        client.write_all(&vec![b'x'; 8192 * 2 + 1]).unwrap();
-        drop(client);
-
-        let result = done_rx
-            .recv_timeout(Duration::from_millis(1500))
-            .expect("tcp-to-serial thread stayed pinned behind buffered TCP data");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(stop.load(Ordering::Relaxed));
+        assert_eq!(payload, 512);
+        assert_eq!(credit, 512);
+        assert_eq!(&serial.written[..link::MAGIC.len()], link::MAGIC);
     }
 }

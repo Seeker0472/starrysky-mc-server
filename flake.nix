@@ -96,8 +96,13 @@
       checks = forAllSystems (system: {
         native-tests = self.packages.${system}.native-tests;
         bridge = self.packages.${system}.bridge;
+        bridge-windows = self.packages.${system}.bridge-windows;
         firmware-c2 = self.packages.${system}.firmware-c2;
         firmware-c2-uart-reversed = self.packages.${system}.firmware-c2-uart-reversed;
+        log-debug = self.packages.${system}.log-debug;
+        log-info = self.packages.${system}.log-info;
+        log-none = self.packages.${system}.log-none;
+        log-trace = self.packages.${system}.log-trace;
       });
 
       devShells = forAllSystems (system:

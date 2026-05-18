@@ -21,8 +21,8 @@ enum {
     MC_BOOTSTRAP_DONE
 };
 
-static const uint8_t bridge_reset_magic[] = {
-    0xff, 0x00, 0xff, 'M', 'C', 'U', 'R', 'S', 'T', 0x7e
+enum {
+    MC_MAX_SERVERBOUND_PACKET_ID = 0x7f
 };
 
 static int read_varint_body(const uint8_t *body, size_t body_len, size_t *pos, int32_t *value)
@@ -205,20 +205,6 @@ static void reset_logical_session(mc_server_t *server)
     server->tx_reset_requested = 1;
 }
 
-static int rx_accum_ends_with_reset_magic(const mc_server_t *server)
-{
-    size_t magic_len = sizeof(bridge_reset_magic);
-    if (server->rx_accum_len < magic_len) {
-        return 0;
-    }
-    for (size_t i = 0; i < magic_len; i++) {
-        if (server->rx_accum[server->rx_accum_len - magic_len + i] != bridge_reset_magic[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 typedef enum {
     MC_HANDSHAKE_NO_MATCH = 0,
     MC_HANDSHAKE_ACCEPTED = 1,
@@ -338,6 +324,31 @@ static mc_frame_status_t classify_frame(const uint8_t *src, size_t src_len, size
     return src_len >= 5u ? MC_FRAME_INVALID : MC_FRAME_NEED_MORE;
 }
 
+static int partial_frame_has_invalid_packet_id(const mc_server_t *server)
+{
+    int32_t body_len = 0;
+    int32_t packet_id = 0;
+    size_t prefix_len = 0;
+    size_t used = 0;
+    size_t body_available = 0;
+
+    if (!mc_varint_decode(server->rx_accum, server->rx_accum_len, &body_len, &prefix_len)) {
+        return 0;
+    }
+    if (body_len < 0 || (size_t)body_len > MC_MAX_PACKET_BODY) {
+        return 1;
+    }
+    if (server->rx_accum_len <= prefix_len) {
+        return 0;
+    }
+
+    body_available = server->rx_accum_len - prefix_len;
+    if (!mc_varint_decode(server->rx_accum + prefix_len, body_available, &packet_id, &used)) {
+        return body_available >= 5u;
+    }
+    return packet_id < 0 || packet_id > MC_MAX_SERVERBOUND_PACKET_ID;
+}
+
 int mc_server_receive(mc_server_t *server, const uint8_t *bytes, size_t len, mc_ringbuf_t *tx)
 {
     for (size_t i = 0; i < len; i++) {
@@ -346,12 +357,6 @@ int mc_server_receive(mc_server_t *server, const uint8_t *bytes, size_t len, mc_
             return 0;
         }
         server->rx_accum[server->rx_accum_len++] = bytes[i];
-        if (rx_accum_ends_with_reset_magic(server)) {
-            reset_logical_session(server);
-            emit_trace(server, MC_TRACE_BRIDGE_RESET, 0, 0, 0, 0u);
-            mc_ringbuf_drop(tx, mc_ringbuf_len(tx));
-            server->rx_accum_len = 0;
-        }
     }
 
     for (;;) {
@@ -359,6 +364,10 @@ int mc_server_receive(mc_server_t *server, const uint8_t *bytes, size_t len, mc_
         size_t frame_len = 0;
         mc_frame_status_t status = classify_frame(server->rx_accum, server->rx_accum_len, &frame_len);
         if (status == MC_FRAME_NEED_MORE) {
+            if (partial_frame_has_invalid_packet_id(server)) {
+                server->rx_accum_len = 0;
+                return 0;
+            }
             break;
         }
         if (status == MC_FRAME_INVALID) {

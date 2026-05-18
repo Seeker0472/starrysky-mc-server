@@ -62,6 +62,9 @@ stdenvNoCC.mkDerivation {
     test -f "build/${firmwareName}"
     test -f "build/${firmwareName}.bin"
     test -f "build/${firmwareName}.hex"
+    if [ ! -f "build/${firmwareName}.txt" ]; then
+      riscv64-none-elf-objdump -d "build/${firmwareName}" > "build/${firmwareName}.txt"
+    fi
     test -f "build/${firmwareName}.txt"
     install -Dm755 "build/${firmwareName}" "$out/${firmwareName}"
     cp "build/${firmwareName}" "$out/${firmwareName}.elf"

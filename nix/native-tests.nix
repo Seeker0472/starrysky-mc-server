@@ -21,6 +21,8 @@ stdenv.mkDerivation {
       native/tests/test_ringbuf.c \
       native/tests/test_varint.c \
       native/tests/test_packet.c \
+      native/tests/test_link_codec.c \
+      native/tests/test_link_session.c \
       native/tests/test_server_status.c \
       native/tests/test_server_login.c \
       native/tests/test_world.c \
@@ -32,12 +34,16 @@ stdenv.mkDerivation {
       native/tests/test_mc_log_debug.c \
       native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c \
+      native/tests/test_platform_uart0.c \
       core/src/mc_ringbuf.c \
       core/src/mc_varint.c \
       core/src/mc_packet.c \
+      core/src/mc_link.c \
+      firmware/mc_link_session.c \
       core/src/mc_world.c \
       core/src/mc_server.c \
       firmware/mc_log.c \
+      firmware/platform_uart0.c \
       -o build/native/mc_uart_tests
     ./build/native/mc_uart_tests
 

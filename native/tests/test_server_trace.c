@@ -12,7 +12,6 @@ typedef struct {
     int handshake_login;
     int login_start;
     int play_enter;
-    int bridge_reset;
     int bootstrap_done;
 } trace_counts_t;
 
@@ -30,9 +29,6 @@ static void trace_sink(void *user, const mc_trace_event_t *event)
     }
     if (event->type == MC_TRACE_PLAY_ENTER) {
         counts->play_enter++;
-    }
-    if (event->type == MC_TRACE_BRIDGE_RESET) {
-        counts->bridge_reset++;
     }
     if (event->type == MC_TRACE_BOOTSTRAP_DONE) {
         counts->bootstrap_done++;
@@ -58,7 +54,7 @@ int test_server_trace(void)
     const uint8_t login_start[] = {
         0x09, 0x00, 0x07, 'p','l','a','y','e','r','1'
     };
-    const uint8_t bridge_reset[] = {
+    const uint8_t legacy_reset_magic[] = {
         0xff, 0x00, 0xff, 'M', 'C', 'U', 'R', 'S', 'T', 0x7e
     };
 
@@ -78,12 +74,11 @@ int test_server_trace(void)
         drain_ring(&tx);
     }
 
-    ASSERT_TRUE(mc_server_receive(&server, bridge_reset, sizeof(bridge_reset), &tx));
+    ASSERT_TRUE(!mc_server_receive(&server, legacy_reset_magic, sizeof(legacy_reset_magic), &tx));
 
     ASSERT_EQ(counts.handshake_login, 1);
     ASSERT_EQ(counts.login_start, 1);
     ASSERT_EQ(counts.play_enter, 1);
-    ASSERT_EQ(counts.bridge_reset, 1);
     ASSERT_EQ(counts.bootstrap_done, 1);
 
     return 0;

@@ -2,6 +2,7 @@
 #include "generated/autoconf.h"
 #include "board.h"
 #include "mc_firmware_config.h"
+#include "platform_uart0.h"
 #include "timer.h"
 
 #define UART1_TX_BUSY 0x100u
@@ -29,11 +30,11 @@ static size_t uart0_read(uint8_t *dst, size_t max_len)
 {
     size_t n = 0;
     while (n < max_len) {
-        int32_t c = (int32_t)REG_UART_0_DATA;
-        if (c == -1) {
+        uint32_t raw = REG_UART_0_DATA;
+        if (!platform_uart0_decode_rx(raw, &dst[n])) {
             break;
         }
-        dst[n++] = (uint8_t)c;
+        n++;
     }
     return n;
 }

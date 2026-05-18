@@ -77,11 +77,11 @@ int test_server_status(void)
     const uint8_t login_start[] = {
         0x09, 0x00, 0x07, 'p','l','a','y','e','r','1'
     };
-    const uint8_t bridge_reset[] = {
+    const uint8_t legacy_reset_magic[] = {
         0xff, 0x00, 0xff, 'M', 'C', 'U', 'R', 'S', 'T', 0x7e
     };
-    const uint8_t partial_then_bridge_reset[] = {
-        0x09, 0xff, 0x00, 0xff, 'M', 'C', 'U', 'R', 'S', 'T', 0x7e
+    const uint8_t framed_payload_with_legacy_reset_magic[] = {
+        0x0b, 0x02, 0xff, 0x00, 0xff, 'M', 'C', 'U', 'R', 'S', 'T', 0x7e
     };
     const uint8_t status_request[] = { 0x01, 0x00 };
     const uint8_t status_ping[] = {
@@ -172,15 +172,26 @@ int test_server_status(void)
     mc_ringbuf_init(&tx, tx_storage, sizeof(tx_storage));
     ASSERT_TRUE(mc_server_receive(&server, handshake_status, sizeof(handshake_status), &tx));
     ASSERT_EQ(server.state, MC_CONN_STATUS);
+    ASSERT_TRUE(mc_server_take_tx_reset(&server));
+    ASSERT_TRUE(!mc_server_take_tx_reset(&server));
     ASSERT_TRUE(mc_server_receive(&server, status_request, sizeof(status_request), &tx));
     ASSERT_TRUE(mc_ringbuf_len(&tx) > 20u);
 
-    ASSERT_TRUE(mc_server_receive(&server, bridge_reset, sizeof(bridge_reset), &tx));
-    ASSERT_EQ(server.state, MC_CONN_HANDSHAKE);
-    ASSERT_EQ(mc_ringbuf_len(&tx), 0u);
-    ASSERT_TRUE(mc_server_take_tx_reset(&server));
+    ASSERT_TRUE(!mc_server_receive(&server, legacy_reset_magic, sizeof(legacy_reset_magic), &tx));
+    ASSERT_EQ(server.state, MC_CONN_STATUS);
+    ASSERT_TRUE(mc_ringbuf_len(&tx) > 20u);
     ASSERT_TRUE(!mc_server_take_tx_reset(&server));
+    ASSERT_EQ(server.rx_accum_len, 0u);
+    out_len = drain(&tx, out, sizeof(out));
+    ASSERT_TRUE(out_len > 20u);
+    ASSERT_TRUE(mc_server_receive(&server, status_ping, sizeof(status_ping), &tx));
+    out_len = drain(&tx, out, sizeof(out));
+    ASSERT_EQ(out_len, 10u);
+    ASSERT_TRUE(packet_id_at(out, out_len, &packet_id));
+    ASSERT_EQ(packet_id, 0x01);
 
+    mc_server_init(&server);
+    mc_ringbuf_init(&tx, tx_storage, sizeof(tx_storage));
     ASSERT_TRUE(mc_server_receive(&server, handshake_login, sizeof(handshake_login), &tx));
     ASSERT_EQ(server.state, MC_CONN_LOGIN);
     ASSERT_TRUE(mc_server_receive(&server, login_start, sizeof(login_start), &tx));
@@ -203,13 +214,18 @@ int test_server_status(void)
     mc_ringbuf_init(&tx, tx_storage, sizeof(tx_storage));
     ASSERT_TRUE(mc_server_receive(&server, handshake_status, sizeof(handshake_status), &tx));
     ASSERT_EQ(server.state, MC_CONN_STATUS);
+    ASSERT_TRUE(mc_server_take_tx_reset(&server));
+    ASSERT_TRUE(!mc_server_take_tx_reset(&server));
     ASSERT_TRUE(mc_server_receive(&server, status_request, sizeof(status_request), &tx));
     ASSERT_TRUE(mc_ringbuf_len(&tx) > 20u);
 
-    ASSERT_TRUE(mc_server_receive(&server, partial_then_bridge_reset, sizeof(partial_then_bridge_reset), &tx));
-    ASSERT_EQ(server.state, MC_CONN_HANDSHAKE);
-    ASSERT_EQ(mc_ringbuf_len(&tx), 0u);
-    ASSERT_TRUE(mc_server_take_tx_reset(&server));
+    ASSERT_TRUE(mc_server_receive(&server,
+                                  framed_payload_with_legacy_reset_magic,
+                                  sizeof(framed_payload_with_legacy_reset_magic),
+                                  &tx));
+    ASSERT_EQ(server.state, MC_CONN_STATUS);
+    ASSERT_TRUE(mc_ringbuf_len(&tx) > 20u);
+    ASSERT_TRUE(!mc_server_take_tx_reset(&server));
     ASSERT_EQ(server.rx_accum_len, 0u);
 
     return 0;

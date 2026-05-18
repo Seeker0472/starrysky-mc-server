@@ -84,6 +84,15 @@ Automatic flashing is not part of this project. The build produces firmware arti
 
 ## Running the Bridge
 
+The bridge and firmware use an internal UART link protocol on the bridge UART.
+The default negotiated payload is 64 bytes, the firmware payload cap is 512 bytes,
+and bridge-to-firmware traffic is limited by firmware CREDIT frames. Normal link
+traffic does not use fixed inter-byte pacing.
+
+Use `log-debug` firmware for gameplay tests. `log-trace` is intended for short
+diagnostics only because raw frame dumps can slow the firmware main loop enough
+to change UART timing.
+
 Linux example:
 
 ```bash

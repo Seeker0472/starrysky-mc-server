@@ -129,7 +129,7 @@ int test_server_login(void)
     out_len = mc_ringbuf_read(&small_tx, out, sizeof(out));
     ASSERT_EQ(count_packet_id(out, out_len, 0x01), 0);
 
-    ASSERT_EQ(MC_TX_RING_CAP, 32768u);
+    ASSERT_TRUE(MC_TX_RING_CAP >= 49152u);
     mc_server_init(&server);
     mc_ringbuf_init(&tx, tx_storage, sizeof(tx_storage));
     ASSERT_TRUE(mc_server_receive(&server, handshake_login, sizeof(handshake_login), &tx));

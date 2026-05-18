@@ -136,6 +136,8 @@ index 0000000..b50b049
 +  $(BOARD_STARTUP) \
 +  $(PROJECT_DIR_ABS)/firmware/main.c \
 +  $(PROJECT_DIR_ABS)/firmware/mc_log.c \
++  $(PROJECT_DIR_ABS)/firmware/mc_link_session.c \
++  $(PROJECT_DIR_ABS)/firmware/platform_uart0.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_ecos.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_compat.c \
 +  $(shell find $(PROJECT_DIR_ABS)/core/src -name "*.c") \

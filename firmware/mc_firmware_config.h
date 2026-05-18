@@ -30,7 +30,15 @@
 #endif
 
 #ifndef MC_UART0_WRITE_BURST_BYTES
-#define MC_UART0_WRITE_BURST_BYTES 16u
+#define MC_UART0_WRITE_BURST_BYTES 128u
+#endif
+
+#ifndef MC_TRACE_LINK_UART_RX_DATA
+#define MC_TRACE_LINK_UART_RX_DATA 0
+#endif
+
+#ifndef MC_LOG_LINK_UART_IO
+#define MC_LOG_LINK_UART_IO 0
 #endif
 
 #if MC_UART0_BAUD <= 0
@@ -43,6 +51,14 @@
 
 #if MC_UART0_WRITE_BURST_BYTES <= 0
 #error "MC_UART0_WRITE_BURST_BYTES must be positive"
+#endif
+
+#if MC_TRACE_LINK_UART_RX_DATA != 0 && MC_TRACE_LINK_UART_RX_DATA != 1
+#error "MC_TRACE_LINK_UART_RX_DATA must be 0 or 1"
+#endif
+
+#if MC_LOG_LINK_UART_IO != 0 && MC_LOG_LINK_UART_IO != 1
+#error "MC_LOG_LINK_UART_IO must be 0 or 1"
 #endif
 
 #if MC_BRIDGE_UART_ID != MC_UART_ID_0 && MC_BRIDGE_UART_ID != MC_UART_ID_1
