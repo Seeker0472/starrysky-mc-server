@@ -1,0 +1,23 @@
+#ifndef MC_CONFIG_H
+#define MC_CONFIG_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define MC_PROTOCOL_VERSION 47
+#define MC_DEFAULT_BAUD 921600u
+
+#define MC_RX_RING_CAP 8192u
+#define MC_TX_RING_CAP 32768u
+#define MC_MAX_PACKET_BODY 32768u
+#define MC_MAX_USERNAME 16u
+#define MC_MAX_STRING_BYTES 32767u
+
+#define MC_TICK_BUDGET_RX_BYTES 512u
+#define MC_TICK_BUDGET_TX_BYTES 512u
+#define MC_TICK_BUDGET_PACKETS 4u
+
+#define MC_DIMENSION_OVERWORLD 0
+#define MC_ENTITY_ID_SELF 1
+
+#endif

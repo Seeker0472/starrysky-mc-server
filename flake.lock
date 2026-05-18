@@ -1,0 +1,44 @@
+{
+  "nodes": {
+    "embedded-sdk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773371582,
+        "narHash": "sha256-JAtRfo0+0UvA2G+hvMyu7siYZzaZmo2V1vo3nxiNbp0=",
+        "ref": "refs/heads/main",
+        "rev": "cc2b6037b119514dbd3752861de1da7cba19c4aa",
+        "revCount": 160,
+        "type": "git",
+        "url": "file:../embedded-sdk"
+      },
+      "original": {
+        "type": "git",
+        "url": "file:../embedded-sdk"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1778869304,
+        "narHash": "sha256-30sZNZoA1cqF5JNO9fVX+wgiQYjB7HJqqJ4ztCDeBZE=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "d233902339c02a9c334e7e593de68855ad26c4cb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "embedded-sdk": "embedded-sdk",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

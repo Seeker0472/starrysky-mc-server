@@ -1,0 +1,14 @@
+result
+result-*
+build/
+.ecos-build/
+.direnv/
+target/
+bridge/target/
+docs/superpowers/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.txt

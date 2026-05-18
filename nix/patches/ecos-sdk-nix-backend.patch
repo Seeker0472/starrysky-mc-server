@@ -1,0 +1,217 @@
+diff --git a/mk/boards/c1.mk b/mk/boards/c1.mk
+new file mode 100644
+index 0000000..0954889
+--- /dev/null
++++ b/mk/boards/c1.mk
+@@ -0,0 +1,9 @@
++BOARD_NAME := StarrySkyC1
++BOARD_DIR := $(ECOS_SDK_HOME)/board/StarrySkyC1
++BOARD_STARTUP := $(BOARD_DIR)/start.s
++BOARD_LDS := $(BOARD_DIR)/sections.lds
++BOARD_INCLUDE := $(BOARD_DIR)
++ARCH_CFLAGS := -mabi=ilp32 -march=rv32im
++SDK_COMPONENT_DIRS := $(ECOS_SDK_HOME)/components
++SDK_DEVICE_DIRS := $(ECOS_SDK_HOME)/devices
++SDK_ASM_SRCS :=
+diff --git a/mk/boards/c2.mk b/mk/boards/c2.mk
+new file mode 100644
+index 0000000..0378ea3
+--- /dev/null
++++ b/mk/boards/c2.mk
+@@ -0,0 +1,9 @@
++BOARD_NAME := StarrySkyC2
++BOARD_DIR := $(ECOS_SDK_HOME)/board/StarrySkyC2
++BOARD_STARTUP := $(BOARD_DIR)/start.S
++BOARD_LDS := $(BOARD_DIR)/sections.lds
++BOARD_INCLUDE := $(BOARD_DIR)
++ARCH_CFLAGS := -mabi=ilp32 -march=rv32im
++SDK_COMPONENT_DIRS := $(ECOS_SDK_HOME)/components
++SDK_DEVICE_DIRS := $(ECOS_SDK_HOME)/devices
++SDK_ASM_SRCS :=
+diff --git a/mk/boards/l3.mk b/mk/boards/l3.mk
+new file mode 100644
+index 0000000..179d351
+--- /dev/null
++++ b/mk/boards/l3.mk
+@@ -0,0 +1,15 @@
++BOARD_NAME := StarrySkyL3
++BOARD_DIR := $(ECOS_SDK_HOME)/board/StarrySkyL3
++BOARD_STARTUP := $(BOARD_DIR)/start.s
++BOARD_LDS := $(BOARD_DIR)/sections.lds
++BOARD_INCLUDE := $(BOARD_DIR)
++ARCH_CFLAGS := -mabi=lp64 -march=rv64ifd_zifencei -mcmodel=medany
++SDK_COMPONENT_DIRS := \
++  $(ECOS_SDK_HOME)/components/sys_uart \
++  $(ECOS_SDK_HOME)/components/libgcc \
++  $(ECOS_SDK_HOME)/components/libc \
++  $(ECOS_SDK_HOME)/components/gpio \
++  $(ECOS_SDK_HOME)/components/i2c
++SDK_DEVICE_DIRS :=
++SDK_ASM_SRCS := \
++  $(shell find $(ECOS_SDK_HOME)/components/libgcc -name "*.S")
+diff --git a/mk/ecos-firmware.mk b/mk/ecos-firmware.mk
+new file mode 100644
+index 0000000..b50b049
+--- /dev/null
++++ b/mk/ecos-firmware.mk
+@@ -0,0 +1,157 @@
++.DEFAULT_GOAL := all
++
++ifndef ECOS_SDK_HOME
++$(error ECOS_SDK_HOME is not set)
++endif
++
++BOARD ?= c2
++PROJECT_DIR ?= $(CURDIR)
++BUILD_DIR ?= $(PROJECT_DIR)/build
++CONFIG_DIR ?= $(PROJECT_DIR)/.ecos-build/config
++DEFCONFIG ?= $(PROJECT_DIR)/configs/$(BOARD)_defconfig
++CROSS ?= riscv64-none-elf-
++FIRMWARE_NAME ?= retrosoc_fw
++
++PROJECT_DIR_ABS := $(abspath $(PROJECT_DIR))
++BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
++CONFIG_DIR_ABS := $(abspath $(CONFIG_DIR))
++DEFCONFIG_ABS := $(abspath $(DEFCONFIG))
++
++BOARD_MK := $(ECOS_SDK_HOME)/mk/boards/$(BOARD).mk
++ifeq ($(wildcard $(BOARD_MK)),)
++$(error Unsupported BOARD '$(BOARD)': missing $(BOARD_MK))
++endif
++include $(BOARD_MK)
++
++KCONFIG := $(ECOS_SDK_HOME)/tools/kconfig/Kconfig
++HOST_TOOLS_DIR := $(BUILD_DIR_ABS)/host-tools
++KCONFIG_WORK_DIR := $(HOST_TOOLS_DIR)/kconfig
++CONF := $(KCONFIG_WORK_DIR)/build/conf
++
++CC := $(CROSS)gcc
++CPP := $(CROSS)cpp
++OBJCOPY := $(CROSS)objcopy
++OBJDUMP := $(CROSS)objdump
++SED ?= sed
++
++ifeq ($(ECOS_INTERNAL_BUILD),1)
++-include $(CONFIG_DIR_ABS)/configs/.config
++endif
++
++CFLAGS := \
++  $(ARCH_CFLAGS) \
++  -Wl,-Bstatic,-T,$(BUILD_DIR_ABS)/retrosoc_sections.lds,--strip-debug \
++  -Wl,-Map=$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).map,--cref \
++  -ffreestanding \
++  -nostdlib
++
++LDS_CPPFLAGS :=
++
++ifdef CONFIG_LINK_RAM_REGION_SRAM
++CFLAGS += -DCONFIG_LINK_RAM_REGION_SRAM
++LDS_CPPFLAGS += -DCONFIG_LINK_RAM_REGION_SRAM
++endif
++
++ifdef CONFIG_LINK_RAM_REGION_PSRAM
++CFLAGS += -DCONFIG_LINK_RAM_REGION_PSRAM
++LDS_CPPFLAGS += -DCONFIG_LINK_RAM_REGION_PSRAM
++endif
++
++ifdef CONFIG_BUILD_OPT_FLAGS
++CFLAGS += $(subst ",,$(CONFIG_BUILD_OPT_FLAGS))
++else
++CFLAGS += -Os
++endif
++
++ifdef CONFIG_BUILD_DEBUG
++CFLAGS += -g -DDEBUG
++endif
++
++CFLAGS += $(EXTRA_CFLAGS)
++
++SDK_C_SRCS := $(foreach dir,$(SDK_COMPONENT_DIRS),$(shell find $(dir) -name "*.c"))
++SDK_C_SRCS += $(foreach dir,$(SDK_DEVICE_DIRS),$(shell find $(dir) -name "*.c"))
++
++SDK_INC_DIRS := $(foreach dir,$(SDK_COMPONENT_DIRS),$(shell find $(dir) -type d))
++SDK_INC_DIRS += $(foreach dir,$(SDK_DEVICE_DIRS),$(shell find $(dir) -type d))
++
++SRC_PATH := \
++  $(BOARD_STARTUP) \
++  $(PROJECT_DIR_ABS)/firmware/main.c \
++  $(PROJECT_DIR_ABS)/firmware/mc_log.c \
++  $(PROJECT_DIR_ABS)/firmware/platform_ecos.c \
++  $(PROJECT_DIR_ABS)/firmware/platform_compat.c \
++  $(shell find $(PROJECT_DIR_ABS)/core/src -name "*.c") \
++  $(SDK_C_SRCS) \
++  $(SDK_ASM_SRCS)
++
++CFLAGS += \
++  -I$(PROJECT_DIR_ABS) \
++  -I$(PROJECT_DIR_ABS)/firmware \
++  -I$(PROJECT_DIR_ABS)/core/include \
++  -I$(CONFIG_DIR_ABS) \
++  -I$(BOARD_INCLUDE) \
++  $(addprefix -I,$(SDK_INC_DIRS))
++
++.PHONY: all configure firmware clean check-inputs
++
++all: configure
++	@$(MAKE) --no-print-directory -f $(ECOS_SDK_HOME)/mk/ecos-firmware.mk \
++		ECOS_INTERNAL_BUILD=1 \
++		ECOS_SDK_HOME="$(ECOS_SDK_HOME)" \
++		PROJECT_DIR="$(PROJECT_DIR_ABS)" \
++		BUILD_DIR="$(BUILD_DIR_ABS)" \
++		CONFIG_DIR="$(CONFIG_DIR_ABS)" \
++		DEFCONFIG="$(DEFCONFIG_ABS)" \
++		BOARD="$(BOARD)" \
++		CROSS="$(CROSS)" \
++		FIRMWARE_NAME="$(FIRMWARE_NAME)" \
++		firmware
++
++check-inputs:
++	@test -f "$(PROJECT_DIR_ABS)/firmware/main.c" || \
++		(echo "Missing project source: $(PROJECT_DIR_ABS)/firmware/main.c" >&2; exit 1)
++	@test -f "$(DEFCONFIG_ABS)" || \
++		(echo "Missing defconfig: $(DEFCONFIG_ABS)" >&2; exit 1)
++	@test -f "$(BOARD_STARTUP)" || \
++		(echo "Missing board startup: $(BOARD_STARTUP)" >&2; exit 1)
++	@test -f "$(BOARD_LDS)" || \
++		(echo "Missing board linker script: $(BOARD_LDS)" >&2; exit 1)
++
++$(KCONFIG_WORK_DIR)/Makefile:
++	@mkdir -p "$(HOST_TOOLS_DIR)"
++	@rm -rf "$(KCONFIG_WORK_DIR)"
++	@cp -R "$(ECOS_SDK_HOME)/tools/kconfig" "$(KCONFIG_WORK_DIR)"
++	@chmod -R u+w "$(KCONFIG_WORK_DIR)"
++
++$(CONF): $(KCONFIG_WORK_DIR)/Makefile
++	@$(MAKE) --no-print-directory -C "$(KCONFIG_WORK_DIR)" \
++		ECOS_SDK_HOME="$(ECOS_SDK_HOME)" \
++		BUILD_DIR="$(KCONFIG_WORK_DIR)/build" \
++		NAME=conf
++
++configure: check-inputs $(CONF)
++	@mkdir -p "$(CONFIG_DIR_ABS)/configs" "$(CONFIG_DIR_ABS)/generated" "$(CONFIG_DIR_ABS)/config"
++	@cd "$(CONFIG_DIR_ABS)" && \
++		KCONFIG_CONFIG="$(CONFIG_DIR_ABS)/configs/.config" \
++		KCONFIG_AUTOCONFIG="$(CONFIG_DIR_ABS)/config/auto.conf" \
++		KCONFIG_AUTOHEADER="$(CONFIG_DIR_ABS)/generated/autoconf.h" \
++		"$(CONF)" -s --defconfig="$(DEFCONFIG_ABS)" "$(KCONFIG)"
++	@cd "$(CONFIG_DIR_ABS)" && \
++		KCONFIG_CONFIG="$(CONFIG_DIR_ABS)/configs/.config" \
++		KCONFIG_AUTOCONFIG="$(CONFIG_DIR_ABS)/config/auto.conf" \
++		KCONFIG_AUTOHEADER="$(CONFIG_DIR_ABS)/generated/autoconf.h" \
++		"$(CONF)" -s --syncconfig "$(KCONFIG)"
++
++firmware: check-inputs
++	@test -f "$(CONFIG_DIR_ABS)/generated/autoconf.h" || \
++		(echo "Missing generated config: run make configure first" >&2; exit 1)
++	@echo "Building $(FIRMWARE_NAME) for $(BOARD_NAME)..."
++	@mkdir -p "$(BUILD_DIR_ABS)"
++	@$(CPP) -P $(LDS_CPPFLAGS) -o "$(BUILD_DIR_ABS)/retrosoc_sections.lds" "$(BOARD_LDS)"
++	@$(CC) $(CFLAGS) -o "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" $(SRC_PATH)
++	@$(OBJCOPY) -O verilog "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).hex"
++	@$(SED) -i 's/@30000000/@00000000/g' "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).hex"
++	@$(OBJCOPY) -O binary "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).bin"
++	@$(OBJDUMP) -d "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" > "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).txt"
++	@echo "Done: $(BUILD_DIR_ABS)/$(FIRMWARE_NAME)"
++
++clean:
++	rm -rf "$(BUILD_DIR_ABS)" "$(CONFIG_DIR_ABS)"
