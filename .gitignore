@@ -3,6 +3,7 @@ result-*
 build/
 .ecos-build/
 .direnv/
+.worktrees/
 target/
 bridge/target/
 docs/superpowers/
