@@ -91,16 +91,27 @@ absolute ACK credit. Firmware-to-PC DATA frames are not ACKed in this version;
 the bridge treats any decode, CRC, or DATA_M2C sequence error as fatal and exits
 so link corruption is visible during testing.
 
-PC-to-firmware traffic calibrates conservative per-byte pacing with RATE_PROBE
-frames. Calibration waits for the link to settle, warms up at the slowest
-profile, then requires three formal probes per profile. A 3/3 profile is stable;
-a 2/3 profile is treated as borderline and stops probing. Real DATA is written
-one byte at a time using one supported profile slower than the fastest stable or
+MCU-to-PC firmware transmit is conservative by default. The default
+`firmware-c2` package is the stable profile. Build `firmware-c2-aggressive` to
+use the validated MCU-to-PC aggressive profile; it keeps the stable frame size,
+TX budget, UART burst, and 115200 baud, and lowers only UART0 TX pacing.
+
+PC-to-firmware traffic remains conservative. It calibrates per-byte pacing with
+RATE_PROBE frames, waits for the link to settle, warms up at the slowest profile,
+then requires three formal probes per profile. A 3/3 profile is stable; a 2/3
+profile is treated as borderline and stops probing. Real DATA is written one
+byte at a time using one supported profile slower than the fastest stable or
 borderline result, and downshifts on retransmit timeouts.
 
-The default bridge UART baud remains 115200 for conservative bring-up. For
-MCU-to-PC throughput testing, build firmware with a higher `MC_UART0_BAUD` or
-`MC_UART1_BAUD` and run the bridge with the matching `--baud` value.
+The default bridge UART baud remains 115200 for conservative bring-up and for
+the validated aggressive profile. If you build custom firmware with a different
+`MC_UART0_BAUD` or `MC_UART1_BAUD`, run the bridge with the matching `--baud`
+value.
+
+```bash
+nix build .#firmware-c2
+nix build .#firmware-c2-aggressive
+```
 
 Use `log-debug` firmware for gameplay tests. `log-trace` is intended for short
 diagnostics only because raw frame dumps can slow the firmware main loop enough
@@ -117,6 +128,14 @@ Windows example:
 ```powershell
 mc-uart-bridge.exe --serial COM3 --baud 115200 --listen 127.0.0.1:25565
 ```
+
+During MCU-to-PC testing, a bridge exit with a serial decode error, CRC error,
+or `DATA_M2C sequence mismatch` means the link lost or corrupted bytes.
+
+The bridge waits `1000ms` before retransmitting unacknowledged PC-to-firmware
+DATA by default. Use `--c2m-retransmit-timeout-ms` only when intentionally
+testing PC-to-firmware behavior; the stable and aggressive firmware profiles do
+not require changing it.
 
 Build a Windows bridge executable from Nix on Linux:
 
