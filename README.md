@@ -84,10 +84,23 @@ Automatic flashing is not part of this project. The build produces firmware arti
 
 ## Running the Bridge
 
-The bridge and firmware use an internal UART link protocol on the bridge UART.
-The default negotiated payload is 64 bytes, the firmware payload cap is 512 bytes,
-and bridge-to-firmware traffic is limited by firmware CREDIT frames. Normal link
-traffic does not use fixed inter-byte pacing.
+The bridge and firmware use UART link protocol V2. V2 frames are COBS-encoded
+and terminated with `0x00`, so corrupted frames are discarded at the next
+delimiter. PC-to-firmware DATA frames use stop-and-wait ACK/retransmission and
+absolute ACK credit. Firmware-to-PC DATA frames are not ACKed in this version;
+the bridge treats any decode, CRC, or DATA_M2C sequence error as fatal and exits
+so link corruption is visible during testing.
+
+PC-to-firmware traffic calibrates conservative per-byte pacing with RATE_PROBE
+frames. Calibration waits for the link to settle, warms up at the slowest
+profile, then requires three formal probes per profile. A 3/3 profile is stable;
+a 2/3 profile is treated as borderline and stops probing. Real DATA is written
+one byte at a time using one supported profile slower than the fastest stable or
+borderline result, and downshifts on retransmit timeouts.
+
+The default bridge UART baud remains 115200 for conservative bring-up. For
+MCU-to-PC throughput testing, build firmware with a higher `MC_UART0_BAUD` or
+`MC_UART1_BAUD` and run the bridge with the matching `--baud` value.
 
 Use `log-debug` firmware for gameplay tests. `log-trace` is intended for short
 diagnostics only because raw frame dumps can slow the firmware main loop enough
