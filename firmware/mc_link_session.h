@@ -18,10 +18,12 @@ typedef struct {
     uint8_t control_tx_storage[MC_LINK_SESSION_TX_CAP];
     mc_ringbuf_t tx;
     mc_ringbuf_t control_tx;
+    uint16_t rx_seq_expected;
+    uint16_t tx_seq_next;
     uint16_t negotiated_payload;
     uint16_t credit_cap;
-    uint8_t rx_seq_expected;
-    uint8_t tx_seq_next;
+    uint16_t supported_rate_mask;
+    uint8_t active_rate_profile;
     uint8_t ready;
     uint8_t reset_requested;
     uint8_t active_tx_queue;
@@ -29,6 +31,8 @@ typedef struct {
     uint32_t data_c2m_frames;
     uint32_t data_m2c_frames;
     uint32_t error_count;
+    uint32_t c2m_ack_frames;
+    uint32_t c2m_duplicate_frames;
 } mc_link_session_t;
 
 void mc_link_session_init(mc_link_session_t *session, mc_ringbuf_t *rx);

@@ -1,6 +1,9 @@
 #include "mc_link_session.h"
+#include "mc_log.h"
 
 #include <string.h>
+
+#define MC_LINK_FIRMWARE_SUPPORTED_RATE_MASK 0x03ffu
 
 static void put_u16_le(uint8_t *dst, uint16_t value)
 {
@@ -13,6 +16,24 @@ static uint16_t get_u16_le(const uint8_t *src)
     return (uint16_t)((uint16_t)src[0] | ((uint16_t)src[1] << 8));
 }
 
+static void log_parser_counters_if_changed(const mc_link_parser_t *parser,
+                                           uint32_t crc_before,
+                                           uint32_t length_before,
+                                           uint32_t resync_before)
+{
+    if (parser->crc_error_count == crc_before &&
+        parser->length_error_count == length_before &&
+        parser->resync_count == resync_before) {
+        return;
+    }
+    MC_LOGD("link parser counters crc=%u length=%u resync=%u buffered=%u discarding=%u",
+            (unsigned int)parser->crc_error_count,
+            (unsigned int)parser->length_error_count,
+            (unsigned int)parser->resync_count,
+            (unsigned int)parser->len,
+            (unsigned int)parser->discarding);
+}
+
 static uint16_t min_u16(uint16_t a, uint16_t b)
 {
     return a < b ? a : b;
@@ -21,13 +42,14 @@ static uint16_t min_u16(uint16_t a, uint16_t b)
 static int queue_frame(mc_link_session_t *session,
                        mc_ringbuf_t *tx,
                        uint8_t type,
-                       uint8_t seq,
+                       uint16_t seq,
+                       uint16_t ack,
                        const uint8_t *payload,
                        size_t payload_len)
 {
     uint8_t frame[MC_LINK_MAX_FRAME_LEN];
     size_t frame_len = 0;
-    if (!mc_link_encode(type, seq, payload, payload_len, frame, sizeof(frame), &frame_len)) {
+    if (!mc_link_encode(type, seq, ack, payload, payload_len, frame, sizeof(frame), &frame_len)) {
         session->error_count++;
         return 0;
     }
@@ -40,29 +62,55 @@ static int queue_frame(mc_link_session_t *session,
 
 static int queue_control_frame(mc_link_session_t *session,
                                uint8_t type,
-                               uint8_t seq,
+                               uint16_t seq,
+                               uint16_t ack,
                                const uint8_t *payload,
                                size_t payload_len)
 {
-    return queue_frame(session, &session->control_tx, type, seq, payload, payload_len);
+    return queue_frame(session, &session->control_tx, type, seq, ack, payload, payload_len);
 }
 
 static int queue_data_frame(mc_link_session_t *session,
                             uint8_t type,
-                            uint8_t seq,
+                            uint16_t seq,
+                            uint16_t ack,
                             const uint8_t *payload,
                             size_t payload_len)
 {
-    return queue_frame(session, &session->tx, type, seq, payload, payload_len);
+    return queue_frame(session, &session->tx, type, seq, ack, payload, payload_len);
 }
 
 static int queue_ready(mc_link_session_t *session)
 {
-    uint8_t payload[5];
-    payload[0] = MC_LINK_VERSION;
-    put_u16_le(payload + 1, session->negotiated_payload);
-    put_u16_le(payload + 3, session->credit_cap);
-    return queue_control_frame(session, MC_LINK_READY, 0, payload, sizeof(payload));
+    uint8_t payload[11];
+    put_u16_le(payload, session->negotiated_payload);
+    put_u16_le(payload + 2u, session->credit_cap);
+    put_u16_le(payload + 4u, session->credit_cap);
+    put_u16_le(payload + 6u, session->supported_rate_mask);
+    payload[8] = session->active_rate_profile;
+    put_u16_le(payload + 9u, 0u);
+    return queue_control_frame(session, MC_LINK_READY, 0u, 0u, payload, sizeof(payload));
+}
+
+static uint16_t rx_free_credit(const mc_link_session_t *session)
+{
+    size_t free_len;
+    if (session->rx == 0) {
+        return 0u;
+    }
+    free_len = mc_ringbuf_free(session->rx);
+    return free_len > 0xffffu ? 0xffffu : (uint16_t)free_len;
+}
+
+static int queue_ack_c2m(mc_link_session_t *session, uint16_t ack)
+{
+    uint8_t payload[2];
+    put_u16_le(payload, rx_free_credit(session));
+    if (!queue_control_frame(session, MC_LINK_ACK_C2M, 0u, ack, payload, sizeof(payload))) {
+        return 0;
+    }
+    session->c2m_ack_frames++;
+    return 1;
 }
 
 static int queue_error(mc_link_session_t *session, uint8_t code, uint8_t detail)
@@ -71,7 +119,7 @@ static int queue_error(mc_link_session_t *session, uint8_t code, uint8_t detail)
     payload[0] = code;
     payload[1] = detail;
     session->error_count++;
-    return queue_control_frame(session, MC_LINK_ERROR, 0, payload, sizeof(payload));
+    return queue_control_frame(session, MC_LINK_ERROR, 0u, 0u, payload, sizeof(payload));
 }
 
 static int peek_ringbuf(mc_ringbuf_t *rb, uint8_t *dst, size_t len)
@@ -90,23 +138,32 @@ static void clear_active_tx(mc_link_session_t *session)
     session->active_tx_remaining = 0u;
 }
 
+static void reset_capabilities(mc_link_session_t *session)
+{
+    session->negotiated_payload = MC_LINK_DEFAULT_PAYLOAD;
+    session->credit_cap = MC_LINK_INITIAL_CREDIT;
+    session->supported_rate_mask = MC_LINK_FIRMWARE_SUPPORTED_RATE_MASK;
+    session->active_rate_profile = 0u;
+}
+
 static int next_frame_len(const mc_ringbuf_t *tx, size_t *frame_len)
 {
-    uint8_t len_lo;
-    uint8_t len_hi;
-    size_t payload_len;
-    if (mc_ringbuf_len(tx) < MC_LINK_HEADER_LEN) {
+    size_t len;
+    if (tx == 0 || frame_len == 0) {
         return 0;
     }
-    if (!mc_ringbuf_peek(tx, 4u, &len_lo) || !mc_ringbuf_peek(tx, 5u, &len_hi)) {
-        return 0;
+    len = mc_ringbuf_len(tx);
+    for (size_t i = 0u; i < len; ++i) {
+        uint8_t byte;
+        if (!mc_ringbuf_peek(tx, i, &byte)) {
+            return 0;
+        }
+        if (byte == MC_LINK_DELIMITER) {
+            *frame_len = i + 1u;
+            return 1;
+        }
     }
-    payload_len = (size_t)len_lo | ((size_t)len_hi << 8);
-    if (payload_len > MC_LINK_FIRMWARE_PAYLOAD_CAP) {
-        return 0;
-    }
-    *frame_len = MC_LINK_HEADER_LEN + payload_len + MC_LINK_CRC_LEN;
-    return mc_ringbuf_len(tx) >= *frame_len;
+    return 0;
 }
 
 static void truncate_ringbuf(mc_ringbuf_t *rb, size_t keep_len)
@@ -125,8 +182,7 @@ void mc_link_session_init(mc_link_session_t *session, mc_ringbuf_t *rx)
     session->rx = rx;
     mc_ringbuf_init(&session->tx, session->tx_storage, sizeof(session->tx_storage));
     mc_ringbuf_init(&session->control_tx, session->control_tx_storage, sizeof(session->control_tx_storage));
-    session->negotiated_payload = MC_LINK_DEFAULT_PAYLOAD;
-    session->credit_cap = MC_LINK_INITIAL_CREDIT;
+    reset_capabilities(session);
     session->ready = 1u;
 }
 
@@ -163,27 +219,31 @@ static int handle_hello(mc_link_session_t *session, const mc_link_frame_t *frame
 {
     uint16_t requested_payload;
     uint16_t requested_credit;
-    if (frame->len != 5u || frame->payload[0] != MC_LINK_VERSION) {
-        return queue_error(session,
-                           frame->len == 5u ? MC_LINK_ERR_BAD_VERSION : MC_LINK_ERR_BAD_LENGTH,
-                           frame->len == 5u ? frame->payload[0] : 0u);
+    uint16_t requested_rate_mask;
+    uint16_t supported_rate_mask;
+    if (frame->len != 6u) {
+        return queue_error(session, MC_LINK_ERR_BAD_LENGTH, 0u);
     }
-    requested_payload = get_u16_le(frame->payload + 1);
-    requested_credit = get_u16_le(frame->payload + 3);
+    requested_payload = get_u16_le(frame->payload);
+    requested_credit = get_u16_le(frame->payload + 2u);
+    requested_rate_mask = get_u16_le(frame->payload + 4u);
     if (requested_payload == 0u || requested_credit == 0u) {
-        return queue_error(session, MC_LINK_ERR_BAD_LENGTH, 0);
+        return queue_error(session, MC_LINK_ERR_BAD_LENGTH, 0u);
     }
-    session->negotiated_payload = min_u16(requested_payload, MC_LINK_FIRMWARE_PAYLOAD_CAP);
-    session->credit_cap = min_u16(requested_credit, MC_LINK_INITIAL_CREDIT);
+    supported_rate_mask = (uint16_t)((requested_rate_mask & MC_LINK_FIRMWARE_SUPPORTED_RATE_MASK) | 1u);
     reset_link_state(session);
+    session->negotiated_payload = min_u16(requested_payload, MC_LINK_DEFAULT_PAYLOAD);
+    session->credit_cap = min_u16(requested_credit, MC_LINK_INITIAL_CREDIT);
+    session->supported_rate_mask = supported_rate_mask;
+    session->active_rate_profile = 0u;
     return queue_ready(session);
 }
 
-static int handle_reset(mc_link_session_t *session)
+static int handle_reset(mc_link_session_t *session, const mc_link_frame_t *frame)
 {
     reset_link_state(session);
     session->reset_requested = 1u;
-    if (!queue_control_frame(session, MC_LINK_RESET_ACK, 0, 0, 0)) {
+    if (!queue_control_frame(session, MC_LINK_RESET_ACK, frame->seq, frame->ack, 0, 0)) {
         return 0;
     }
     return queue_ready(session);
@@ -194,9 +254,12 @@ static int handle_data_c2m(mc_link_session_t *session, const mc_link_frame_t *fr
     if (!session->ready) {
         return queue_error(session, MC_LINK_ERR_PROTOCOL_STATE, frame->type);
     }
+    if (frame->seq == (uint16_t)(session->rx_seq_expected - 1u)) {
+        session->c2m_duplicate_frames++;
+        return queue_ack_c2m(session, session->rx_seq_expected);
+    }
     if (frame->seq != session->rx_seq_expected) {
-        (void)queue_error(session, MC_LINK_ERR_SEQUENCE, frame->seq);
-        reset_link_state_preserving_control_tx(session);
+        (void)queue_error(session, MC_LINK_ERR_SEQUENCE, (uint8_t)frame->seq);
         return 0;
     }
     if (frame->len == 0u || frame->len > session->negotiated_payload) {
@@ -204,17 +267,15 @@ static int handle_data_c2m(mc_link_session_t *session, const mc_link_frame_t *fr
     }
     if (session->rx == 0 || mc_ringbuf_free(session->rx) < frame->len) {
         (void)queue_error(session, MC_LINK_ERR_RX_OVERFLOW, (uint8_t)frame->len);
-        reset_link_state_preserving_control_tx(session);
         return 0;
     }
     if (mc_ringbuf_write(session->rx, frame->payload, frame->len) != frame->len) {
         (void)queue_error(session, MC_LINK_ERR_RX_OVERFLOW, (uint8_t)frame->len);
-        reset_link_state_preserving_control_tx(session);
         return 0;
     }
     session->rx_seq_expected++;
     session->data_c2m_frames++;
-    return 1;
+    return queue_ack_c2m(session, session->rx_seq_expected);
 }
 
 static int handle_frame(mc_link_session_t *session, const mc_link_frame_t *frame)
@@ -223,11 +284,31 @@ static int handle_frame(mc_link_session_t *session, const mc_link_frame_t *frame
     case MC_LINK_HELLO:
         return handle_hello(session, frame);
     case MC_LINK_RESET:
-        return handle_reset(session);
+        return handle_reset(session, frame);
     case MC_LINK_DATA_C2M:
         return handle_data_c2m(session, frame);
+    case MC_LINK_RATE_PROBE:
+    {
+        uint16_t sleep_us = frame->len >= 2u ? get_u16_le(frame->payload) : 0u;
+        uint16_t nonce = frame->len >= 4u ? get_u16_le(frame->payload + 2u) : 0u;
+        int queued;
+        (void)sleep_us;
+        (void)nonce;
+        MC_LOGD("rate probe seq=%u len=%u sleep_us=%u nonce=%u",
+                (unsigned int)frame->seq,
+                (unsigned int)frame->len,
+                (unsigned int)sleep_us,
+                (unsigned int)nonce);
+        queued = queue_control_frame(session, MC_LINK_RATE_PROBE_ACK,
+                                     frame->seq, frame->ack,
+                                     frame->payload, frame->len);
+        MC_LOGD("rate probe ack queued=%u control_free=%u",
+                (unsigned int)(queued ? 1u : 0u),
+                (unsigned int)mc_ringbuf_free(&session->control_tx));
+        return queued;
+    }
     case MC_LINK_PING:
-        return queue_control_frame(session, MC_LINK_PONG, frame->seq, frame->payload, frame->len);
+        return queue_control_frame(session, MC_LINK_PONG, frame->seq, frame->ack, frame->payload, frame->len);
     default:
         return queue_error(session, MC_LINK_ERR_UNEXPECTED_TYPE, frame->type);
     }
@@ -237,33 +318,40 @@ int mc_link_session_receive_bytes(mc_link_session_t *session, const uint8_t *src
 {
     mc_link_frame_t frame;
     mc_link_parse_result_t result;
+    uint32_t crc_before;
+    uint32_t length_before;
+    uint32_t resync_before;
     if (session == 0 || (len > 0u && src == 0)) {
         return 0;
     }
+    crc_before = session->parser.crc_error_count;
+    length_before = session->parser.length_error_count;
+    resync_before = session->parser.resync_count;
     result = mc_link_parser_feed(&session->parser, src, len, &frame);
     while (result == MC_LINK_PARSE_FRAME) {
         if (!handle_frame(session, &frame)) {
+            log_parser_counters_if_changed(&session->parser,
+                                           crc_before,
+                                           length_before,
+                                           resync_before);
             return 0;
         }
         result = mc_link_parser_feed(&session->parser, 0, 0, &frame);
     }
+    log_parser_counters_if_changed(&session->parser,
+                                   crc_before,
+                                   length_before,
+                                   resync_before);
     return result != MC_LINK_PARSE_ERROR;
 }
 
 void mc_link_session_credit_consumed(mc_link_session_t *session, size_t consumed_len)
 {
+    (void)consumed_len;
     if (session == 0) {
         return;
     }
-    while (consumed_len > 0u) {
-        uint8_t payload[2];
-        uint16_t chunk = consumed_len > 0xffffu ? 0xffffu : (uint16_t)consumed_len;
-        put_u16_le(payload, chunk);
-        if (!queue_control_frame(session, MC_LINK_CREDIT, 0, payload, sizeof(payload))) {
-            return;
-        }
-        consumed_len -= chunk;
-    }
+    (void)queue_ack_c2m(session, 0u);
 }
 
 int mc_link_session_reset_after_error(mc_link_session_t *session, uint8_t code, uint8_t detail)
@@ -280,7 +368,7 @@ int mc_link_session_reset_after_error(mc_link_session_t *session, uint8_t code, 
 
 int mc_link_session_queue_server_tx(mc_link_session_t *session, mc_ringbuf_t *server_tx)
 {
-    uint8_t payload[MC_LINK_FIRMWARE_PAYLOAD_CAP];
+    uint8_t payload[MC_LINK_MAX_PAYLOAD];
     size_t max_payload;
     size_t n;
     if (session == 0 || server_tx == 0 || !session->ready) {
@@ -300,7 +388,7 @@ int mc_link_session_queue_server_tx(mc_link_session_t *session, mc_ringbuf_t *se
     if (!peek_ringbuf(server_tx, payload, n)) {
         return 0;
     }
-    if (!queue_data_frame(session, MC_LINK_DATA_M2C, session->tx_seq_next, payload, n)) {
+    if (!queue_data_frame(session, MC_LINK_DATA_M2C, session->tx_seq_next, session->rx_seq_expected, payload, n)) {
         return 0;
     }
     mc_ringbuf_drop(server_tx, n);

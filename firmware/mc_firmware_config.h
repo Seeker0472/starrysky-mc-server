@@ -1,6 +1,8 @@
 #ifndef MC_FIRMWARE_CONFIG_H
 #define MC_FIRMWARE_CONFIG_H
 
+#include "mc_config.h"
+
 #define MC_UART_ID_0 0u
 #define MC_UART_ID_1 1u
 
@@ -33,6 +35,10 @@
 #define MC_UART0_WRITE_BURST_BYTES 128u
 #endif
 
+#ifndef MC_LINK_TX_MAX_BYTES_PER_LOOP
+#define MC_LINK_TX_MAX_BYTES_PER_LOOP MC_TICK_BUDGET_TX_BYTES
+#endif
+
 #ifndef MC_TRACE_LINK_UART_RX_DATA
 #define MC_TRACE_LINK_UART_RX_DATA 0
 #endif
@@ -51,6 +57,10 @@
 
 #if MC_UART0_WRITE_BURST_BYTES <= 0
 #error "MC_UART0_WRITE_BURST_BYTES must be positive"
+#endif
+
+#if MC_LINK_TX_MAX_BYTES_PER_LOOP <= 0
+#error "MC_LINK_TX_MAX_BYTES_PER_LOOP must be positive"
 #endif
 
 #if MC_TRACE_LINK_UART_RX_DATA != 0 && MC_TRACE_LINK_UART_RX_DATA != 1

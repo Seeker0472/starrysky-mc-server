@@ -1,5 +1,8 @@
+#include "mc_config.h"
 #include "mc_firmware_config.h"
+#include "mc_link.h"
 
+#define ASSERT_TRUE(expr) do { if (!(expr)) return 1; } while (0)
 #define ASSERT_EQ(a, b) do { if ((a) != (b)) return 1; } while (0)
 
 int test_firmware_config(void)
@@ -14,6 +17,10 @@ int test_firmware_config(void)
     ASSERT_EQ(MC_LOG_UART_BAUD, 115200u);
     ASSERT_EQ(MC_LOG_LEVEL, MC_LOG_INFO);
     ASSERT_EQ(MC_UART0_WRITE_BURST_BYTES, 128u);
+    ASSERT_EQ(MC_LINK_TX_MAX_BYTES_PER_LOOP, MC_TICK_BUDGET_TX_BYTES);
+    ASSERT_TRUE(MC_TICK_BUDGET_TX_BYTES >= MC_LINK_MAX_ENCODED_LEN);
+    ASSERT_TRUE(MC_UART0_WRITE_BURST_BYTES >= 128u);
+    ASSERT_TRUE(MC_BRIDGE_UART_BAUD >= 115200u);
     ASSERT_EQ(MC_TRACE_LINK_UART_RX_DATA, 0);
     ASSERT_EQ(MC_LOG_LINK_UART_IO, 0);
     return 0;

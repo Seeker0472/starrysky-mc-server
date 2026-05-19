@@ -31,10 +31,13 @@ static int should_log_count(uint32_t count)
 
 static int link_pending_is_data_m2c(void)
 {
-    return link_pending_len >= MC_LINK_HEADER_LEN &&
-           link_pending[0] == MC_LINK_MAGIC0 &&
-           link_pending[1] == MC_LINK_MAGIC1 &&
-           link_pending[2] == MC_LINK_DATA_M2C;
+    mc_link_frame_t frame;
+    if (link_pending_len == 0u || link_pending_pos > 0u ||
+        link_pending_len > sizeof(link_pending)) {
+        return 0;
+    }
+    return mc_link_decode_frame(link_pending, link_pending_len, &frame) &&
+           frame.type == MC_LINK_DATA_M2C;
 }
 
 static void drop_stale_link_tx_data(void)
@@ -170,20 +173,30 @@ static void pump_server(void)
 
 static void pump_link_tx(void)
 {
+    size_t budget = MC_LINK_TX_MAX_BYTES_PER_LOOP;
+
     if (link_pending_pos < link_pending_len) {
+        size_t to_write = link_pending_len - link_pending_pos;
+        if (to_write > budget) {
+            to_write = budget;
+        }
         size_t written = platform_bridge_write(link_pending + link_pending_pos,
-                                               link_pending_len - link_pending_pos);
+                                               to_write);
         if (written > 0u) {
 #if MC_LOG_LINK_UART_IO
             MC_LOGD("link tx uart bytes=%u", (unsigned int)written);
 #endif
         }
         link_pending_pos += written;
+        budget -= written;
         if (link_pending_pos < link_pending_len) {
             return;
         }
         link_pending_len = 0;
         link_pending_pos = 0;
+        if (budget == 0u) {
+            return;
+        }
     }
 
     if (!mc_link_session_queue_server_tx(&link_session, &tx_ring)) {
@@ -195,7 +208,12 @@ static void pump_link_tx(void)
 
     link_pending_len = mc_link_session_read_tx(&link_session, link_pending, sizeof(link_pending));
     if (link_pending_len > 0u) {
-        size_t written = platform_bridge_write(link_pending, link_pending_len);
+        size_t to_write = link_pending_len;
+        size_t written;
+        if (to_write > budget) {
+            to_write = budget;
+        }
+        written = platform_bridge_write(link_pending, to_write);
         if (written > 0u) {
 #if MC_LOG_LINK_UART_IO
             MC_LOGD("link tx uart bytes=%u", (unsigned int)written);
