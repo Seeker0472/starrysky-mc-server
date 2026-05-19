@@ -7,6 +7,8 @@
 
 #undef MC_LINK_TX_MAX_BYTES_PER_LOOP
 #define MC_LINK_TX_MAX_BYTES_PER_LOOP 64u
+#undef MC_LINK_TX_PENDING_BYTES
+#define MC_LINK_TX_PENDING_BYTES 1024u
 
 #define ASSERT_TRUE(expr) do { if (!(expr)) return 1; } while (0)
 #define ASSERT_EQ(a, b) do { if ((a) != (b)) return 1; } while (0)
@@ -738,6 +740,7 @@ static int test_firmware_main_pump_link_tx_obeys_loop_budget(void)
     pump_link_tx();
     ASSERT_TRUE(platform_bridge_write_last_len <= MC_LINK_TX_MAX_BYTES_PER_LOOP);
     ASSERT_EQ(link_pending_pos, MC_LINK_TX_MAX_BYTES_PER_LOOP);
+    ASSERT_EQ(sizeof(link_pending), MC_LINK_TX_PENDING_BYTES);
     ASSERT_TRUE(link_pending_len > link_pending_pos);
 
     platform_bridge_write_limit = 16u;

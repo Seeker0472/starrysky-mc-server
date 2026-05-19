@@ -9,16 +9,14 @@
 #define UART1_RX_EMPTY 0x080u
 #define PLATFORM_LOG_ZERO_PROGRESS_LIMIT 1024u
 
-#ifndef MC_UART0_TX_PACE_LOOPS
-#define MC_UART0_TX_PACE_LOOPS ((CONFIG_CPU_FREQ_MHZ * 1000000u * 10u) / MC_UART0_BAUD / 8u)
-#endif
-
 static void uart0_tx_pace(void)
 {
+#if MC_UART0_TX_PACE_LOOPS > 0
     volatile uint32_t i;
     for (i = 0; i < MC_UART0_TX_PACE_LOOPS; i++) {
         __asm__ volatile ("" ::: "memory");
     }
+#endif
 }
 
 static void uart0_init(void)

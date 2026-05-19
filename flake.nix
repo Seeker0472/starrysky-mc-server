@@ -64,6 +64,10 @@
             variant = "uart-reversed";
             extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_1 -DMC_LOG_UART_ID=MC_UART_ID_0";
           };
+          firmware-c2-aggressive = mkFirmware "c2" {
+            variant = "aggressive";
+            extraCFlags = "-DMC_M2C_AGGRESSIVE_TX=1";
+          };
           log-debug = mkFirmware "c2" {
             variant = "log-debug";
             extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_0 -DMC_LOG_UART_ID=MC_UART_ID_1 -DMC_LOG_LEVEL=MC_LOG_DEBUG";
@@ -98,6 +102,7 @@
         bridge = self.packages.${system}.bridge;
         bridge-windows = self.packages.${system}.bridge-windows;
         firmware-c2 = self.packages.${system}.firmware-c2;
+        firmware-c2-aggressive = self.packages.${system}.firmware-c2-aggressive;
         firmware-c2-uart-reversed = self.packages.${system}.firmware-c2-uart-reversed;
         log-debug = self.packages.${system}.log-debug;
         log-info = self.packages.${system}.log-info;

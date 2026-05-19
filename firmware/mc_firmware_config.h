@@ -2,6 +2,7 @@
 #define MC_FIRMWARE_CONFIG_H
 
 #include "mc_config.h"
+#include "mc_link.h"
 
 #define MC_UART_ID_0 0u
 #define MC_UART_ID_1 1u
@@ -31,12 +32,40 @@
 #define MC_LOG_LEVEL MC_LOG_INFO
 #endif
 
+#ifndef MC_M2C_AGGRESSIVE_TX
+#define MC_M2C_AGGRESSIVE_TX 0
+#endif
+
+#if MC_M2C_AGGRESSIVE_TX != 0 && MC_M2C_AGGRESSIVE_TX != 1
+#error "MC_M2C_AGGRESSIVE_TX must be 0 or 1"
+#endif
+
+#ifndef MC_FIRMWARE_CPU_FREQ_MHZ
+#ifdef CONFIG_CPU_FREQ_MHZ
+#define MC_FIRMWARE_CPU_FREQ_MHZ CONFIG_CPU_FREQ_MHZ
+#else
+#define MC_FIRMWARE_CPU_FREQ_MHZ MC_DEFAULT_CPU_FREQ_MHZ
+#endif
+#endif
+
+#ifndef MC_UART0_TX_PACE_LOOPS
+#if MC_M2C_AGGRESSIVE_TX
+#define MC_UART0_TX_PACE_LOOPS 384u
+#else
+#define MC_UART0_TX_PACE_LOOPS ((MC_FIRMWARE_CPU_FREQ_MHZ * 1000000u * 10u) / MC_UART0_BAUD / 8u)
+#endif
+#endif
+
 #ifndef MC_UART0_WRITE_BURST_BYTES
 #define MC_UART0_WRITE_BURST_BYTES 128u
 #endif
 
 #ifndef MC_LINK_TX_MAX_BYTES_PER_LOOP
 #define MC_LINK_TX_MAX_BYTES_PER_LOOP MC_TICK_BUDGET_TX_BYTES
+#endif
+
+#ifndef MC_LINK_TX_PENDING_BYTES
+#define MC_LINK_TX_PENDING_BYTES MC_LINK_TX_MAX_BYTES_PER_LOOP
 #endif
 
 #ifndef MC_TRACE_LINK_UART_RX_DATA
@@ -61,6 +90,18 @@
 
 #if MC_LINK_TX_MAX_BYTES_PER_LOOP <= 0
 #error "MC_LINK_TX_MAX_BYTES_PER_LOOP must be positive"
+#endif
+
+#if MC_UART0_TX_PACE_LOOPS < 0
+#error "MC_UART0_TX_PACE_LOOPS must be non-negative"
+#endif
+
+#if MC_UART0_TX_PACE_LOOPS > (MC_FIRMWARE_CPU_FREQ_MHZ * 1000000u)
+#error "MC_UART0_TX_PACE_LOOPS exceeds one second of CPU cycles"
+#endif
+
+#if MC_LINK_TX_PENDING_BYTES <= 0
+#error "MC_LINK_TX_PENDING_BYTES must be positive"
 #endif
 
 #if MC_TRACE_LINK_UART_RX_DATA != 0 && MC_TRACE_LINK_UART_RX_DATA != 1

@@ -82,6 +82,23 @@ stdenv.mkDerivation {
     fi
 
     cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
+      -DMC_M2C_AGGRESSIVE_TX=1 \
+      -DMC_EXPECT_M2C_AGGRESSIVE_TX=1 \
+      -DMC_EXPECT_UART0_WRITE_BURST_BYTES=128u \
+      -DMC_EXPECT_LINK_TX_MAX_BYTES_PER_LOOP=MC_TICK_BUDGET_TX_BYTES \
+      -DMC_EXPECT_LINK_TX_PENDING_BYTES=MC_TICK_BUDGET_TX_BYTES \
+      -DMC_EXPECT_UART0_TX_PACE_LOOPS=384u \
+      -c native/tests/test_firmware_config_compile.c \
+      -o build/native/firmware_config_m2c_aggressive.o
+
+    cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
+      -DMC_M2C_AGGRESSIVE_TX=0 \
+      -DCONFIG_CPU_FREQ_MHZ=96u \
+      -DMC_EXPECT_UART0_TX_PACE_LOOPS=1041u \
+      -c native/tests/test_firmware_config_compile.c \
+      -o build/native/firmware_config_board_cpu_freq.o
+
+    cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
       -DMC_LOG_LEVEL=MC_LOG_TRACE \
       -c native/tests/test_firmware_config_compile.c \
       -o build/native/firmware_config_log_trace.o

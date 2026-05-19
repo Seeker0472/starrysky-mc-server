@@ -12,7 +12,7 @@ static mc_ringbuf_t rx_ring;
 static mc_ringbuf_t tx_ring;
 static mc_server_t server;
 static mc_link_session_t link_session;
-static uint8_t link_pending[MC_TICK_BUDGET_TX_BYTES];
+static uint8_t link_pending[MC_LINK_TX_PENDING_BYTES];
 static size_t link_pending_len;
 static size_t link_pending_pos;
 static volatile uint32_t rx_parse_error_count;
