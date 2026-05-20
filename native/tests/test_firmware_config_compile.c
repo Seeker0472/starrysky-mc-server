@@ -40,6 +40,18 @@
 #define MC_EXPECT_UART0_TX_PACE_LOOPS MC_UART0_TX_PACE_LOOPS
 #endif
 
+#ifndef MC_EXPECT_PROTOCOL_COMPRESSION_ENABLE
+#define MC_EXPECT_PROTOCOL_COMPRESSION_ENABLE MC_PROTOCOL_COMPRESSION_ENABLE
+#endif
+
+#ifndef MC_EXPECT_COMPRESSION_THRESHOLD
+#define MC_EXPECT_COMPRESSION_THRESHOLD MC_COMPRESSION_THRESHOLD
+#endif
+
+#ifndef MC_EXPECT_USE_PSRAM_COMPRESSED_MAP
+#define MC_EXPECT_USE_PSRAM_COMPRESSED_MAP MC_USE_PSRAM_COMPRESSED_MAP
+#endif
+
 #if MC_BRIDGE_UART_ID != MC_EXPECT_BRIDGE_UART_ID
 #error "unexpected bridge uart mapping"
 #endif
@@ -78,6 +90,18 @@
 
 #if MC_UART0_TX_PACE_LOOPS != MC_EXPECT_UART0_TX_PACE_LOOPS
 #error "unexpected UART0 TX pace loops"
+#endif
+
+#if MC_PROTOCOL_COMPRESSION_ENABLE != MC_EXPECT_PROTOCOL_COMPRESSION_ENABLE
+#error "unexpected protocol compression setting"
+#endif
+
+#if MC_COMPRESSION_THRESHOLD != MC_EXPECT_COMPRESSION_THRESHOLD
+#error "unexpected compression threshold"
+#endif
+
+#if MC_USE_PSRAM_COMPRESSED_MAP != MC_EXPECT_USE_PSRAM_COMPRESSED_MAP
+#error "unexpected PSRAM compressed map setting"
 #endif
 
 int firmware_config_compile_probe = 0;

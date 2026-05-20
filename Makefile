@@ -1,10 +1,16 @@
-.PHONY: firmware firmware-reversed test-native bridge check clean
+.PHONY: firmware firmware-legacy firmware-aggressive firmware-log-debug test-native bridge check clean
 
 firmware:
 	nix build .#firmware-c2
 
-firmware-reversed:
-	nix build .#firmware-c2-uart-reversed
+firmware-legacy:
+	nix build .#firmware-c2-legacy
+
+firmware-aggressive:
+	nix build .#firmware-c2-aggressive
+
+firmware-log-debug:
+	nix build .#log-debug
 
 test-native:
 	nix build .#native-tests

@@ -9,7 +9,7 @@ Minimal Minecraft Java Edition 1.8.x server for StarrySky C2 using a UART byte s
 - Default bridge data link: UART0/SYS_UART/type-c at 115200 baud
 - Default log output: UART1/HP_UART at 115200 baud
 - Minecraft protocol: Java Edition 1.8.x, protocol version 47
-- Server mode: offline, no encryption, no compression, one player
+- Server mode: offline, no encryption, protocol compression enabled, one player
 
 ## Architecture
 
@@ -57,21 +57,14 @@ Defaults:
 #define MC_LOG_LEVEL MC_LOG_INFO
 ```
 
-`MC_BRIDGE_UART_ID` and `MC_LOG_UART_ID` must be different so firmware logs never share the bridge data link. To reverse the UART responsibilities, set `MC_BRIDGE_UART_ID` to `MC_UART_ID_1` and `MC_LOG_UART_ID` to `MC_UART_ID_0`, or build the provided reversed variant:
-
-```bash
-nix build .#firmware-c2-uart-reversed
-```
+`MC_BRIDGE_UART_ID` and `MC_LOG_UART_ID` must be different so firmware logs never share the bridge data link. To reverse the UART responsibilities, set `MC_BRIDGE_UART_ID` to `MC_UART_ID_1` and `MC_LOG_UART_ID` to `MC_UART_ID_0` in a local development override.
 
 Firmware logging supports `MC_LOG_OFF`, `MC_LOG_INFO`, `MC_LOG_DEBUG`, and `MC_LOG_TRACE`. `INFO` logs boot, link, state, and error events; `DEBUG` adds more detailed packet and byte-flow diagnostics; `TRACE` adds raw received data dumps.
 
-Ready-made C2 firmware variants keep UART0 as the bridge and UART1 as the log output while selecting the log level:
+The maintained debug firmware keeps the default compressed-map PSRAM profile and selects `MC_LOG_DEBUG`:
 
 ```bash
 nix build .#log-debug
-nix build .#log-trace
-nix build .#log-info
-nix build .#log-none
 ```
 
 ## Reference Policy
@@ -91,10 +84,14 @@ absolute ACK credit. Firmware-to-PC DATA frames are not ACKed in this version;
 the bridge treats any decode, CRC, or DATA_M2C sequence error as fatal and exits
 so link corruption is visible during testing.
 
-MCU-to-PC firmware transmit is conservative by default. The default
-`firmware-c2` package is the stable profile. Build `firmware-c2-aggressive` to
-use the validated MCU-to-PC aggressive profile; it keeps the stable frame size,
-TX budget, UART burst, and 115200 baud, and lowers only UART0 TX pacing.
+The default `firmware-c2` package uses Minecraft protocol compression, offline
+precompressed spawn chunks, and PSRAM runtime chunk storage. Build
+`firmware-c2-legacy` only when you need the old SRAM map fallback.
+
+MCU-to-PC firmware transmit is conservative by default. Build
+`firmware-c2-aggressive` to use the validated MCU-to-PC aggressive profile; it
+keeps the stable frame size, TX budget, UART burst, and 115200 baud, and lowers
+only UART0 TX pacing.
 
 PC-to-firmware traffic remains conservative. It calibrates per-byte pacing with
 RATE_PROBE frames, waits for the link to settle, warms up at the slowest profile,
@@ -110,12 +107,14 @@ value.
 
 ```bash
 nix build .#firmware-c2
+nix build .#firmware-c2-legacy
 nix build .#firmware-c2-aggressive
+nix build .#log-debug
 ```
 
-Use `log-debug` firmware for gameplay tests. `log-trace` is intended for short
-diagnostics only because raw frame dumps can slow the firmware main loop enough
-to change UART timing.
+Use `log-debug` firmware for gameplay tests that need firmware diagnostics.
+`MC_LOG_TRACE` is intended only for short local diagnostics because raw frame
+dumps can slow the firmware main loop enough to change UART timing.
 
 Linux example:
 

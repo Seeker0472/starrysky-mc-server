@@ -76,6 +76,18 @@
 #define MC_LOG_LINK_UART_IO 0
 #endif
 
+#ifndef MC_PSRAM_ENABLE
+#define MC_PSRAM_ENABLE 0
+#endif
+
+#ifndef MC_PSRAM_FLOW_TEST
+#define MC_PSRAM_FLOW_TEST 0
+#endif
+
+#ifndef MC_PSRAM_FLOW_TEST_BYTES
+#define MC_PSRAM_FLOW_TEST_BYTES 65536u
+#endif
+
 #if MC_UART0_BAUD <= 0
 #error "MC_UART0_BAUD must be positive"
 #endif
@@ -110,6 +122,22 @@
 
 #if MC_LOG_LINK_UART_IO != 0 && MC_LOG_LINK_UART_IO != 1
 #error "MC_LOG_LINK_UART_IO must be 0 or 1"
+#endif
+
+#if MC_PSRAM_ENABLE != 0 && MC_PSRAM_ENABLE != 1
+#error "MC_PSRAM_ENABLE must be 0 or 1"
+#endif
+
+#if MC_PSRAM_FLOW_TEST != 0 && MC_PSRAM_FLOW_TEST != 1
+#error "MC_PSRAM_FLOW_TEST must be 0 or 1"
+#endif
+
+#if MC_PSRAM_FLOW_TEST_BYTES <= 0
+#error "MC_PSRAM_FLOW_TEST_BYTES must be positive"
+#endif
+
+#if (MC_PSRAM_FLOW_TEST_BYTES % 4u) != 0
+#error "MC_PSRAM_FLOW_TEST_BYTES must be 32-bit aligned"
 #endif
 
 #if MC_BRIDGE_UART_ID != MC_UART_ID_0 && MC_BRIDGE_UART_ID != MC_UART_ID_1

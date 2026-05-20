@@ -54,7 +54,7 @@ new file mode 100644
 index 0000000..b50b049
 --- /dev/null
 +++ b/mk/ecos-firmware.mk
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,173 @@
 +.DEFAULT_GOAL := all
 +
 +ifndef ECOS_SDK_HOME
@@ -68,6 +68,7 @@ index 0000000..b50b049
 +DEFCONFIG ?= $(PROJECT_DIR)/configs/$(BOARD)_defconfig
 +CROSS ?= riscv64-none-elf-
 +FIRMWARE_NAME ?= retrosoc_fw
++COMPRESSED_MAP_ASSETS ?= 0
 +
 +PROJECT_DIR_ABS := $(abspath $(PROJECT_DIR))
 +BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
@@ -138,11 +139,16 @@ index 0000000..b50b049
 +  $(PROJECT_DIR_ABS)/firmware/mc_log.c \
 +  $(PROJECT_DIR_ABS)/firmware/mc_link_session.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_uart0.c \
++  $(PROJECT_DIR_ABS)/firmware/platform_psram.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_ecos.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_compat.c \
 +  $(shell find $(PROJECT_DIR_ABS)/core/src -name "*.c") \
 +  $(SDK_C_SRCS) \
 +  $(SDK_ASM_SRCS)
++
++ifeq ($(COMPRESSED_MAP_ASSETS),1)
++SRC_PATH += $(PROJECT_DIR_ABS)/core/generated/mc_world_compressed_assets.c
++endif
 +
 +CFLAGS += \
 +  -I$(PROJECT_DIR_ABS) \
@@ -151,6 +157,10 @@ index 0000000..b50b049
 +  -I$(CONFIG_DIR_ABS) \
 +  -I$(BOARD_INCLUDE) \
 +  $(addprefix -I,$(SDK_INC_DIRS))
++
++ifeq ($(COMPRESSED_MAP_ASSETS),1)
++CFLAGS += -I$(PROJECT_DIR_ABS)/core/generated
++endif
 +
 +.PHONY: all configure firmware clean check-inputs
 +
@@ -165,6 +175,7 @@ index 0000000..b50b049
 +		BOARD="$(BOARD)" \
 +		CROSS="$(CROSS)" \
 +		FIRMWARE_NAME="$(FIRMWARE_NAME)" \
++		COMPRESSED_MAP_ASSETS="$(COMPRESSED_MAP_ASSETS)" \
 +		firmware
 +
 +check-inputs:

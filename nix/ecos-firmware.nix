@@ -10,6 +10,7 @@
   gnumake,
   gnused,
   gnugrep,
+  python3,
   riscvToolchain,
   sdk,
   src,
@@ -18,6 +19,7 @@
   firmwareName ? "mc_uart_fw",
   variant ? "",
   extraCFlags ? "",
+  compressedMapAssets ? false,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -37,13 +39,16 @@ stdenvNoCC.mkDerivation {
     gnused
     gnugrep
     riscvToolchain
-  ];
+  ] ++ lib.optional compressedMapAssets python3;
 
   dontConfigure = true;
 
   buildPhase = ''
     runHook preBuild
     export ECOS_SDK_HOME="${sdk}"
+  '' + lib.optionalString compressedMapAssets ''
+    python3 scripts/generate_compressed_chunks.py --out-dir core/generated --check
+  '' + ''
     make -f "${sdk}/mk/ecos-firmware.mk" \
       PROJECT_DIR="$PWD" \
       BUILD_DIR="$PWD/build" \
@@ -52,6 +57,7 @@ stdenvNoCC.mkDerivation {
       BOARD="${board}" \
       CROSS="riscv64-none-elf-" \
       FIRMWARE_NAME="${firmwareName}" \
+      COMPRESSED_MAP_ASSETS="${if compressedMapAssets then "1" else "0"}" \
       EXTRA_CFLAGS="${extraCFlags}"
     runHook postBuild
   '';

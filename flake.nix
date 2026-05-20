@@ -55,34 +55,36 @@
               riscvToolchain = pkgs.pkgsCross.riscv64-embedded.stdenv.cc;
             } // extraArgs);
 
-          firmwarePackages = lib.mapAttrs' (boardKey: _boardConfig:
-            lib.nameValuePair "firmware-${boardKey}" (mkFirmware boardKey {})
-          ) boards;
+          mkC2CompressedFlags = { logLevel ? "MC_LOG_INFO", aggressive ? false }:
+            lib.concatStringsSep " " ([
+              "-DMC_PSRAM_ENABLE=1"
+              "-DMC_PROTOCOL_COMPRESSION_ENABLE=1"
+              "-DMC_USE_PSRAM_COMPRESSED_MAP=1"
+              "-DMC_COMPRESSION_THRESHOLD=8192u"
+              "-DMC_LOG_LEVEL=${logLevel}"
+            ] ++ lib.optional aggressive "-DMC_M2C_AGGRESSIVE_TX=1");
+
+          firmwareC2 = mkFirmware "c2" {
+            compressedMapAssets = true;
+            extraCFlags = mkC2CompressedFlags {};
+          };
         in
-        firmwarePackages // {
-          firmware-c2-uart-reversed = mkFirmware "c2" {
-            variant = "uart-reversed";
-            extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_1 -DMC_LOG_UART_ID=MC_UART_ID_0";
+        {
+          firmware-c2 = firmwareC2;
+          firmware-c2-legacy = firmwareC2.override {
+            variant = "legacy";
+            compressedMapAssets = false;
+            extraCFlags = "";
           };
-          firmware-c2-aggressive = mkFirmware "c2" {
+          firmware-c2-aggressive = firmwareC2.override {
             variant = "aggressive";
-            extraCFlags = "-DMC_M2C_AGGRESSIVE_TX=1";
+            compressedMapAssets = true;
+            extraCFlags = mkC2CompressedFlags { aggressive = true; };
           };
-          log-debug = mkFirmware "c2" {
+          log-debug = firmwareC2.override {
             variant = "log-debug";
-            extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_0 -DMC_LOG_UART_ID=MC_UART_ID_1 -DMC_LOG_LEVEL=MC_LOG_DEBUG";
-          };
-          log-trace = mkFirmware "c2" {
-            variant = "log-trace";
-            extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_0 -DMC_LOG_UART_ID=MC_UART_ID_1 -DMC_LOG_LEVEL=MC_LOG_TRACE";
-          };
-          log-info = mkFirmware "c2" {
-            variant = "log-info";
-            extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_0 -DMC_LOG_UART_ID=MC_UART_ID_1 -DMC_LOG_LEVEL=MC_LOG_INFO";
-          };
-          log-none = mkFirmware "c2" {
-            variant = "log-none";
-            extraCFlags = "-DMC_BRIDGE_UART_ID=MC_UART_ID_0 -DMC_LOG_UART_ID=MC_UART_ID_1 -DMC_LOG_LEVEL=MC_LOG_OFF";
+            compressedMapAssets = true;
+            extraCFlags = mkC2CompressedFlags { logLevel = "MC_LOG_DEBUG"; };
           };
           ecos-sdk = sdk;
           native-tests = pkgs.callPackage ./nix/native-tests.nix {
@@ -94,7 +96,7 @@
           bridge-windows = pkgs.pkgsCross.mingwW64.callPackage ./nix/bridge.nix {
             src = projectSrc;
           };
-          default = firmwarePackages."firmware-${defaultBoard}";
+          default = firmwareC2;
         });
 
       checks = forAllSystems (system: {
@@ -102,12 +104,9 @@
         bridge = self.packages.${system}.bridge;
         bridge-windows = self.packages.${system}.bridge-windows;
         firmware-c2 = self.packages.${system}.firmware-c2;
+        firmware-c2-legacy = self.packages.${system}.firmware-c2-legacy;
         firmware-c2-aggressive = self.packages.${system}.firmware-c2-aggressive;
-        firmware-c2-uart-reversed = self.packages.${system}.firmware-c2-uart-reversed;
         log-debug = self.packages.${system}.log-debug;
-        log-info = self.packages.${system}.log-info;
-        log-none = self.packages.${system}.log-none;
-        log-trace = self.packages.${system}.log-trace;
       });
 
       devShells = forAllSystems (system:

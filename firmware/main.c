@@ -5,6 +5,10 @@
 #include "mc_log.h"
 #include "mc_ringbuf.h"
 #include "mc_server.h"
+#include "platform_psram.h"
+#if MC_USE_PSRAM_COMPRESSED_MAP
+#include "mc_world_compressed.h"
+#endif
 
 static uint8_t rx_storage[MC_RX_RING_CAP];
 static uint8_t tx_storage[MC_TX_RING_CAP];
@@ -23,6 +27,24 @@ static volatile int32_t tx_backpressure_stage;
 static volatile int32_t tx_backpressure_chunk;
 
 static void server_trace(void *user, const mc_trace_event_t *event);
+
+static void init_compressed_map_or_halt(void)
+{
+#if MC_USE_PSRAM_COMPRESSED_MAP
+    if (!platform_psram_init()) {
+        MC_LOGI("psram init failed; halted");
+        for (;;) {
+        }
+    }
+    if (!mc_world_compressed_init(platform_psram_base(), platform_psram_size())) {
+        MC_LOGI("compressed map psram init failed; halted");
+        for (;;) {
+        }
+    }
+    MC_LOGI("compressed map psram ready chunks=%u",
+            (unsigned int)mc_world_compressed_chunk_count());
+#endif
+}
 
 static int should_log_count(uint32_t count)
 {
@@ -237,6 +259,7 @@ void main(void)
             (unsigned int)MC_UART1_BAUD,
             (unsigned int)MC_BRIDGE_UART_ID,
             (unsigned int)MC_LOG_UART_ID);
+    init_compressed_map_or_halt();
     reset_connection("boot");
 
     for (;;) {
