@@ -1,6 +1,7 @@
 result
 result-*
 build/
+core/generated/
 .ecos-build/
 .direnv/
 .worktrees/

@@ -17,6 +17,7 @@ int test_mc_log_trace(void);
 int test_server_trace(void);
 int test_firmware_main(void);
 int test_platform_uart0(void);
+int test_platform_psram(void);
 
 static int run_test(const char *name, int (*fn)(void))
 {
@@ -49,5 +50,6 @@ int main(void)
     failed |= run_test("server_trace", test_server_trace);
     failed |= run_test("firmware_main", test_firmware_main);
     failed |= run_test("platform_uart0", test_platform_uart0);
+    failed |= run_test("platform_psram", test_platform_psram);
     return failed ? 1 : 0;
 }

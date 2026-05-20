@@ -7,6 +7,7 @@
 #define MC_WORLD_CHUNK_COUNT 9u
 
 /* Core world generation is single-thread/single-server oriented for firmware and native tests. */
+#if !MC_USE_PSRAM_COMPRESSED_MAP
 static uint8_t world_chunk_data[MC_CHUNK_SECTION_BYTES];
 static uint8_t world_chunk_body[MC_CHUNK_SECTION_BYTES + 32u];
 
@@ -35,12 +36,39 @@ static uint16_t block_for_y(int y)
     }
     return 0u;
 }
+#endif
 
 size_t mc_world_spawn_chunk_count(void)
 {
     return MC_WORLD_CHUNK_COUNT;
 }
 
+#if MC_USE_PSRAM_COMPRESSED_MAP
+int mc_world_build_chunk_body(int32_t chunk_x, int32_t chunk_z, uint8_t *body, size_t body_cap, size_t *body_len)
+{
+    (void)chunk_x;
+    (void)chunk_z;
+    (void)body;
+    (void)body_cap;
+    if (body_len != 0) {
+        *body_len = 0u;
+    }
+    return 0;
+}
+
+int mc_world_queue_spawn_chunk(mc_ringbuf_t *tx, size_t index)
+{
+    (void)tx;
+    (void)index;
+    return 0;
+}
+
+int mc_world_queue_spawn_chunks(mc_ringbuf_t *tx)
+{
+    (void)tx;
+    return 0;
+}
+#else
 int mc_world_build_chunk_body(int32_t chunk_x, int32_t chunk_z, uint8_t *body, size_t body_cap, size_t *body_len)
 {
     mc_writer_t w;
@@ -153,3 +181,4 @@ int mc_world_queue_spawn_chunks(mc_ringbuf_t *tx)
 
     return 1;
 }
+#endif

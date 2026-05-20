@@ -1,10 +1,15 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include "mc_config.h"
 #include "mc_packet.h"
 #include "mc_ringbuf.h"
 #include "mc_varint.h"
 #include "mc_world.h"
+#include "mc_world_compressed.h"
+#if MC_USE_PSRAM_COMPRESSED_MAP
+#include "mc_world_compressed_assets.h"
+#endif
 
 #define WORLD_TEST_TX_RING_CAP 131072u
 
@@ -125,6 +130,76 @@ static int read_chunk_header(const mc_packet_t *packet, int32_t *chunk_x, int32_
     return 1;
 }
 
+static int test_compressed_world_init_and_queue(void)
+{
+#if MC_USE_PSRAM_COMPRESSED_MAP
+    uint8_t arena[4096];
+    uint8_t tx_storage[4096];
+    uint8_t frame[4096];
+    uint8_t data_len_varint[5];
+    mc_ringbuf_t tx;
+    const mc_world_compressed_chunk_t *chunk;
+    size_t data_len_varint_len;
+    size_t needed_len;
+    size_t frame_len = 0;
+    mc_packet_t packet;
+    const uint8_t *compressed = 0;
+    size_t compressed_len = 0;
+    int32_t data_len = 0;
+
+    ASSERT_TRUE(mc_world_compressed_asset_count == mc_world_spawn_chunk_count());
+    ASSERT_TRUE(mc_world_compressed_total_bytes > 0u);
+    ASSERT_TRUE(mc_world_compressed_total_bytes < sizeof(arena));
+    ASSERT_TRUE(mc_world_compressed_init(arena, sizeof(arena)));
+    ASSERT_TRUE(mc_world_compressed_ready());
+    ASSERT_EQ(mc_world_compressed_chunk_count(), mc_world_compressed_asset_count);
+
+    chunk = mc_world_compressed_chunk(0u);
+    ASSERT_TRUE(chunk != 0);
+    ASSERT_TRUE(chunk->compressed >= arena);
+    ASSERT_TRUE(chunk->compressed + chunk->compressed_len <= arena + sizeof(arena));
+
+    ASSERT_TRUE(!mc_world_compressed_init(arena, (size_t)mc_world_compressed_total_bytes - 1u));
+    ASSERT_TRUE(!mc_world_compressed_ready());
+    ASSERT_EQ(mc_world_compressed_chunk_count(), 0u);
+    ASSERT_TRUE(mc_world_compressed_chunk(0u) == 0);
+
+    ASSERT_TRUE(mc_world_compressed_init(arena, sizeof(arena)));
+    ASSERT_TRUE(mc_world_compressed_ready());
+    chunk = mc_world_compressed_chunk(0u);
+    ASSERT_TRUE(chunk != 0);
+
+    mc_ringbuf_init(&tx, tx_storage, sizeof(tx_storage));
+    ASSERT_TRUE(mc_world_compressed_chunk(mc_world_compressed_chunk_count()) == 0);
+    ASSERT_TRUE(!mc_world_queue_compressed_spawn_chunk(&tx, mc_world_compressed_chunk_count()));
+    ASSERT_EQ(mc_ringbuf_len(&tx), 0u);
+
+    needed_len = mc_packet_compressed_payload_frame_len((int32_t)chunk->raw_body_len, chunk->compressed_len);
+    ASSERT_TRUE(needed_len > 1u);
+    ASSERT_TRUE(needed_len <= sizeof(tx_storage));
+    mc_ringbuf_init(&tx, tx_storage, needed_len - 1u);
+    ASSERT_TRUE(!mc_world_queue_compressed_spawn_chunk(&tx, 0u));
+    ASSERT_EQ(mc_ringbuf_len(&tx), 0u);
+
+    mc_ringbuf_init(&tx, tx_storage, sizeof(tx_storage));
+    ASSERT_TRUE(mc_world_queue_compressed_spawn_chunk(&tx, 0u));
+    ASSERT_TRUE(read_frame(&tx, frame, sizeof(frame), &frame_len));
+    ASSERT_EQ(frame_len, needed_len);
+    ASSERT_TRUE(mc_packet_try_read(frame, frame_len, &packet));
+    ASSERT_TRUE(mc_packet_get_compressed_body(packet.body, packet.body_len, &compressed, &compressed_len, &data_len));
+    data_len_varint_len = mc_varint_encode((int32_t)chunk->raw_body_len,
+                                           data_len_varint,
+                                           sizeof(data_len_varint));
+    ASSERT_TRUE(data_len_varint_len > 0u);
+    ASSERT_EQ(data_len, (int32_t)chunk->raw_body_len);
+    ASSERT_TRUE(data_len > (int32_t)MC_CHUNK_SECTION_BYTES);
+    ASSERT_EQ(compressed_len, chunk->compressed_len);
+    ASSERT_TRUE(compressed == packet.body + data_len_varint_len);
+    ASSERT_TRUE(memcmp(compressed, chunk->compressed, compressed_len) == 0);
+#endif
+    return 0;
+}
+
 int test_world(void)
 {
     static const int32_t expected_chunks[9][2] = {
@@ -170,6 +245,8 @@ int test_world(void)
     mc_ringbuf_init(&tx, tx_storage, 70000u);
     ASSERT_TRUE(!mc_world_queue_spawn_chunks(&tx));
     ASSERT_EQ(mc_ringbuf_len(&tx), 0u);
+
+    ASSERT_TRUE(test_compressed_world_init_and_queue() == 0);
 
     return 0;
 }

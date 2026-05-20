@@ -3,6 +3,10 @@
 #include "mc_packet.h"
 #include "mc_varint.h"
 #include "mc_world.h"
+#if MC_USE_PSRAM_COMPRESSED_MAP
+#include "mc_world_compressed.h"
+#endif
+#include <limits.h>
 #include <string.h>
 
 typedef enum {
@@ -24,6 +28,22 @@ enum {
 enum {
     MC_MAX_SERVERBOUND_PACKET_ID = 0x7f
 };
+
+#if MC_PROTOCOL_COMPRESSION_ENABLE && !MC_USE_PSRAM_COMPRESSED_MAP
+static const int32_t server_spawn_chunks[][2] = {
+    {0, 0},
+    {1, 0},
+    {-1, 0},
+    {0, 1},
+    {0, -1},
+    {1, 1},
+    {-1, -1},
+    {1, -1},
+    {-1, 1},
+};
+
+static uint8_t server_chunk_body[MC_CHUNK_SECTION_BYTES + 32u];
+#endif
 
 static int read_varint_body(const uint8_t *body, size_t body_len, size_t *pos, int32_t *value)
 {
@@ -66,6 +86,40 @@ int mc_server_queue_packet(mc_ringbuf_t *tx, const uint8_t *body, size_t body_le
            mc_ringbuf_write(tx, body, body_len) == body_len;
 }
 
+#if MC_PROTOCOL_COMPRESSION_ENABLE
+static int queue_packet_compressed_plain(mc_ringbuf_t *tx, const uint8_t *body, size_t body_len)
+{
+    uint8_t prefix[5];
+    uint8_t zero = 0u;
+    size_t inner_len = 1u + body_len;
+    size_t prefix_len = 0;
+    size_t free_len = mc_ringbuf_free(tx);
+
+    if (body_len > MC_MAX_PACKET_BODY || inner_len > (size_t)INT32_MAX) {
+        return 0;
+    }
+    prefix_len = mc_varint_encode((int32_t)inner_len, prefix, sizeof(prefix));
+    if (prefix_len == 0u || free_len < prefix_len + inner_len) {
+        return 0;
+    }
+    return mc_ringbuf_write(tx, prefix, prefix_len) == prefix_len &&
+           mc_ringbuf_write(tx, &zero, 1u) == 1u &&
+           mc_ringbuf_write(tx, body, body_len) == body_len;
+}
+#endif
+
+static int queue_packet_auto(const mc_server_t *server, mc_ringbuf_t *tx, const uint8_t *body, size_t body_len)
+{
+#if MC_PROTOCOL_COMPRESSION_ENABLE
+    if (server->compression_enabled) {
+        return queue_packet_compressed_plain(tx, body, body_len);
+    }
+#else
+    (void)server;
+#endif
+    return mc_server_queue_packet(tx, body, body_len);
+}
+
 static int queue_status_response(mc_ringbuf_t *tx)
 {
     static const char json[] =
@@ -90,18 +144,44 @@ static int queue_pong(mc_ringbuf_t *tx, const uint8_t *payload)
            mc_server_queue_packet(tx, body, w.len);
 }
 
+static int build_login_success_body(uint8_t *body, size_t body_cap, const char *username, size_t *body_len)
+{
+    mc_writer_t w;
+    mc_writer_init(&w, body, body_cap);
+    if (!mc_write_varint(&w, 0x02) ||
+        !mc_write_string(&w, "00000000-0000-0000-0000-000000000001") ||
+        !mc_write_string(&w, username)) {
+        return 0;
+    }
+    *body_len = w.len;
+    return 1;
+}
+
+#if !MC_PROTOCOL_COMPRESSION_ENABLE
 static int queue_login_success(mc_ringbuf_t *tx, const char *username)
 {
     uint8_t body[128];
-    mc_writer_t w;
-    mc_writer_init(&w, body, sizeof(body));
-    return mc_write_varint(&w, 0x02) &&
-           mc_write_string(&w, "00000000-0000-0000-0000-000000000001") &&
-           mc_write_string(&w, username) &&
-           mc_server_queue_packet(tx, body, w.len);
+    size_t body_len = 0;
+    return build_login_success_body(body, sizeof(body), username, &body_len) &&
+           mc_server_queue_packet(tx, body, body_len);
 }
+#endif
 
-static int queue_join_game(mc_ringbuf_t *tx)
+#if MC_PROTOCOL_COMPRESSION_ENABLE
+static int build_set_compression(uint8_t *body, size_t body_cap, int32_t threshold, size_t *body_len)
+{
+    mc_writer_t w;
+    mc_writer_init(&w, body, body_cap);
+    if (!mc_write_varint(&w, 0x03) ||
+        !mc_write_varint(&w, threshold)) {
+        return 0;
+    }
+    *body_len = w.len;
+    return 1;
+}
+#endif
+
+static int queue_join_game(const mc_server_t *server, mc_ringbuf_t *tx)
 {
     uint8_t body[128];
     mc_writer_t w;
@@ -114,20 +194,20 @@ static int queue_join_game(mc_ringbuf_t *tx)
            mc_write_u8(&w, 1u) &&
            mc_write_string(&w, "flat") &&
            mc_write_bool(&w, 0) &&
-           mc_server_queue_packet(tx, body, w.len);
+           queue_packet_auto(server, tx, body, w.len);
 }
 
-static int queue_spawn_position(mc_ringbuf_t *tx)
+static int queue_spawn_position(const mc_server_t *server, mc_ringbuf_t *tx)
 {
     uint8_t body[32];
     mc_writer_t w;
     mc_writer_init(&w, body, sizeof(body));
     return mc_write_varint(&w, 0x05) &&
            mc_write_i64(&w, 0) &&
-           mc_server_queue_packet(tx, body, w.len);
+           queue_packet_auto(server, tx, body, w.len);
 }
 
-static int queue_time(mc_ringbuf_t *tx)
+static int queue_time(const mc_server_t *server, mc_ringbuf_t *tx)
 {
     uint8_t body[32];
     mc_writer_t w;
@@ -135,10 +215,10 @@ static int queue_time(mc_ringbuf_t *tx)
     return mc_write_varint(&w, 0x03) &&
            mc_write_i64(&w, 0) &&
            mc_write_i64(&w, 6000) &&
-           mc_server_queue_packet(tx, body, w.len);
+           queue_packet_auto(server, tx, body, w.len);
 }
 
-static int queue_health(mc_ringbuf_t *tx)
+static int queue_health(const mc_server_t *server, mc_ringbuf_t *tx)
 {
     uint8_t body[32];
     mc_writer_t w;
@@ -147,10 +227,10 @@ static int queue_health(mc_ringbuf_t *tx)
            mc_write_f32(&w, 20.0f) &&
            mc_write_varint(&w, 20) &&
            mc_write_f32(&w, 5.0f) &&
-           mc_server_queue_packet(tx, body, w.len);
+           queue_packet_auto(server, tx, body, w.len);
 }
 
-static int queue_position(mc_ringbuf_t *tx)
+static int queue_position(const mc_server_t *server, mc_ringbuf_t *tx)
 {
     uint8_t body[64];
     mc_writer_t w;
@@ -162,13 +242,38 @@ static int queue_position(mc_ringbuf_t *tx)
            mc_write_f32(&w, 0.0f) &&
            mc_write_f32(&w, 0.0f) &&
            mc_write_i8(&w, 0) &&
-           mc_server_queue_packet(tx, body, w.len);
+           queue_packet_auto(server, tx, body, w.len);
 }
+
+#if MC_PROTOCOL_COMPRESSION_ENABLE && !MC_USE_PSRAM_COMPRESSED_MAP
+static int queue_spawn_chunk_auto(const mc_server_t *server, mc_ringbuf_t *tx, size_t index)
+{
+    size_t body_len = 0;
+
+    if (!server->compression_enabled) {
+        return mc_world_queue_spawn_chunk(tx, index);
+    }
+    if (index >= sizeof(server_spawn_chunks) / sizeof(server_spawn_chunks[0]) ||
+        index >= mc_world_spawn_chunk_count()) {
+        return 0;
+    }
+    if (!mc_world_build_chunk_body(server_spawn_chunks[index][0],
+                                   server_spawn_chunks[index][1],
+                                   server_chunk_body,
+                                   sizeof(server_chunk_body),
+                                   &body_len)) {
+        return 0;
+    }
+    return queue_packet_auto(server, tx, server_chunk_body, body_len);
+}
+#endif
 
 void mc_server_init(mc_server_t *server)
 {
     memset(server, 0, sizeof(*server));
     server->state = MC_CONN_HANDSHAKE;
+    server->compression_enabled = 0;
+    server->compression_threshold = (int32_t)MC_COMPRESSION_THRESHOLD;
 }
 
 void mc_server_set_trace(mc_server_t *server, mc_trace_sink_t sink, void *user)
@@ -199,6 +304,8 @@ static void reset_logical_session(mc_server_t *server)
 {
     memset(server->username, 0, sizeof(server->username));
     server->state = MC_CONN_HANDSHAKE;
+    server->compression_enabled = 0;
+    server->compression_threshold = (int32_t)MC_COMPRESSION_THRESHOLD;
     server->play_bootstrap_sent = 0;
     server->play_bootstrap_stage = 0;
     server->play_bootstrap_chunk_index = 0;
@@ -291,9 +398,39 @@ static int handle_packet(mc_server_t *server, const mc_packet_t *packet, mc_ring
             return 0;
         }
         emit_trace(server, MC_TRACE_LOGIN_START, 0, 0, username, strlen(username));
+#if MC_PROTOCOL_COMPRESSION_ENABLE
+        {
+            uint8_t compression_body[16];
+            size_t compression_body_len = 0;
+            uint8_t success_body[128];
+            size_t success_body_len = 0;
+            size_t needed;
+
+            if (!build_set_compression(compression_body,
+                                       sizeof(compression_body),
+                                       server->compression_threshold,
+                                       &compression_body_len) ||
+                !build_login_success_body(success_body, sizeof(success_body), username, &success_body_len)) {
+                return 0;
+            }
+            needed = mc_packet_frame_len(compression_body_len);
+            needed += mc_packet_compressed_plain_frame_len(success_body_len);
+            if (needed == 0u || mc_ringbuf_free(tx) < needed) {
+                return 0;
+            }
+            if (!mc_server_queue_packet(tx, compression_body, compression_body_len)) {
+                return 0;
+            }
+            server->compression_enabled = 1;
+            if (!queue_packet_compressed_plain(tx, success_body, success_body_len)) {
+                return 0;
+            }
+        }
+#else
         if (!queue_login_success(tx, username)) {
             return 0;
         }
+#endif
         memcpy(server->username, username, sizeof(username));
         server->state = MC_CONN_PLAY;
         emit_trace(server, MC_TRACE_PLAY_ENTER, 0, 0, server->username, strlen(server->username));
@@ -343,6 +480,28 @@ static int partial_frame_has_invalid_packet_id(const mc_server_t *server)
     }
 
     body_available = server->rx_accum_len - prefix_len;
+#if MC_PROTOCOL_COMPRESSION_ENABLE
+    if (server->compression_enabled) {
+        int32_t data_len = 0;
+
+        if (!mc_varint_decode(server->rx_accum + prefix_len, body_available, &data_len, &used)) {
+            return body_available >= 5u;
+        }
+        if (data_len != 0) {
+            return 1;
+        }
+        if (body_available <= used) {
+            return 0;
+        }
+        body_available -= used;
+        if (!mc_varint_decode(server->rx_accum + prefix_len + used, body_available, &packet_id, &used)) {
+            return body_available >= 5u;
+        }
+        return packet_id < 0 || packet_id > MC_MAX_SERVERBOUND_PACKET_ID;
+    }
+#else
+    (void)server;
+#endif
     if (!mc_varint_decode(server->rx_accum + prefix_len, body_available, &packet_id, &used)) {
         return body_available >= 5u;
     }
@@ -379,7 +538,28 @@ int mc_server_receive(mc_server_t *server, const uint8_t *bytes, size_t len, mc_
             server->rx_accum_len = 0;
             return 0;
         }
-        if (!handle_packet(server, &packet, tx)) {
+        if (server->compression_enabled) {
+            const uint8_t *body = 0;
+            size_t body_len = 0;
+            int32_t data_len = 0;
+            mc_packet_t compressed_packet;
+
+            if (!mc_packet_get_compressed_body(packet.body, packet.body_len, &body, &body_len, &data_len)) {
+                server->rx_accum_len = 0;
+                return 0;
+            }
+            if (data_len != 0) {
+                server->rx_accum_len = 0;
+                return 0;
+            }
+            compressed_packet.body = body;
+            compressed_packet.body_len = body_len;
+            compressed_packet.frame_len = body_len;
+            if (!handle_packet(server, &compressed_packet, tx)) {
+                server->rx_accum_len = 0;
+                return 0;
+            }
+        } else if (!handle_packet(server, &packet, tx)) {
             server->rx_accum_len = 0;
             return 0;
         }
@@ -408,25 +588,41 @@ int mc_server_tick(mc_server_t *server, mc_ringbuf_t *tx)
             int advance_stage = 1;
             switch (server->play_bootstrap_stage) {
             case MC_BOOTSTRAP_JOIN_GAME:
-                queued = queue_join_game(tx);
+                queued = queue_join_game(server, tx);
                 break;
             case MC_BOOTSTRAP_SPAWN_POSITION:
-                queued = queue_spawn_position(tx);
+                queued = queue_spawn_position(server, tx);
                 break;
             case MC_BOOTSTRAP_TIME:
-                queued = queue_time(tx);
+                queued = queue_time(server, tx);
                 break;
             case MC_BOOTSTRAP_HEALTH:
-                queued = queue_health(tx);
+                queued = queue_health(server, tx);
                 break;
             case MC_BOOTSTRAP_POSITION:
-                queued = queue_position(tx);
+                queued = queue_position(server, tx);
                 break;
             case MC_BOOTSTRAP_CHUNKS:
+#if MC_PROTOCOL_COMPRESSION_ENABLE && MC_USE_PSRAM_COMPRESSED_MAP
+                if (server->compression_enabled) {
+                    queued = mc_world_queue_compressed_spawn_chunk(tx, server->play_bootstrap_chunk_index);
+                } else {
+                    queued = mc_world_queue_spawn_chunk(tx, server->play_bootstrap_chunk_index);
+                }
+#elif MC_PROTOCOL_COMPRESSION_ENABLE
+                queued = queue_spawn_chunk_auto(server, tx, server->play_bootstrap_chunk_index);
+#else
                 queued = mc_world_queue_spawn_chunk(tx, server->play_bootstrap_chunk_index);
+#endif
                 if (queued) {
+                    size_t chunk_count = mc_world_spawn_chunk_count();
+#if MC_USE_PSRAM_COMPRESSED_MAP
+                    if (server->compression_enabled) {
+                        chunk_count = mc_world_compressed_chunk_count();
+                    }
+#endif
                     server->play_bootstrap_chunk_index++;
-                    if ((size_t)server->play_bootstrap_chunk_index < mc_world_spawn_chunk_count()) {
+                    if ((size_t)server->play_bootstrap_chunk_index < chunk_count) {
                         advance_stage = 0;
                     }
                 }

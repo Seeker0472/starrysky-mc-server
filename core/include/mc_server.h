@@ -48,6 +48,8 @@ typedef void (*mc_trace_sink_t)(void *user, const mc_trace_event_t *event);
 
 typedef struct {
     mc_conn_state_t state;
+    uint8_t compression_enabled;
+    int32_t compression_threshold;
     char username[MC_MAX_USERNAME + 1u];
     uint32_t ticks;
     int play_bootstrap_sent;
