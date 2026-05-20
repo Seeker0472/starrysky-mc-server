@@ -43,6 +43,18 @@ make test-native
 make bridge
 ```
 
+Firmware builds print an upstream-style memory usage table in the Nix build
+log and install the same table beside the firmware artifacts:
+
+```bash
+nix build .#firmware-c2
+cat result/memory-report.txt
+```
+
+The report separates FLASH, SRAM, and PSRAM. The PSRAM row includes explicit
+runtime arena usage such as the compressed-map assets copied into PSRAM at
+boot.
+
 ## UART Roles and Logging
 
 Firmware UART configuration lives in `firmware/mc_firmware_config.h`.
