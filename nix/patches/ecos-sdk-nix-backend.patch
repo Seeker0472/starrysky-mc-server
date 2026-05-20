@@ -18,7 +18,7 @@ new file mode 100644
 index 0000000..0378ea3
 --- /dev/null
 +++ b/mk/boards/c2.mk
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,15 @@
 +BOARD_NAME := StarrySkyC2
 +BOARD_DIR := $(ECOS_SDK_HOME)/board/StarrySkyC2
 +BOARD_STARTUP := $(BOARD_DIR)/start.S
@@ -28,6 +28,12 @@ index 0000000..0378ea3
 +SDK_COMPONENT_DIRS := $(ECOS_SDK_HOME)/components
 +SDK_DEVICE_DIRS := $(ECOS_SDK_HOME)/devices
 +SDK_ASM_SRCS :=
++REPORT_FLASH_START := 0x00000000
++REPORT_FLASH_SIZE := 16777216
++REPORT_SRAM_START := 0x30000000
++REPORT_SRAM_SIZE := 131072
++REPORT_PSRAM_START := 0x40000000
++REPORT_PSRAM_SIZE := 8388608
 diff --git a/mk/boards/l3.mk b/mk/boards/l3.mk
 new file mode 100644
 index 0000000..179d351
@@ -54,7 +60,7 @@ new file mode 100644
 index 0000000..b50b049
 --- /dev/null
 +++ b/mk/ecos-firmware.mk
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,283 @@
 +.DEFAULT_GOAL := all
 +
 +ifndef ECOS_SDK_HOME
@@ -69,11 +75,14 @@ index 0000000..b50b049
 +CROSS ?= riscv64-none-elf-
 +FIRMWARE_NAME ?= retrosoc_fw
 +COMPRESSED_MAP_ASSETS ?= 0
++PSRAM_RUNTIME_BYTES ?= 0
 +
 +PROJECT_DIR_ABS := $(abspath $(PROJECT_DIR))
 +BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
 +CONFIG_DIR_ABS := $(abspath $(CONFIG_DIR))
 +DEFCONFIG_ABS := $(abspath $(DEFCONFIG))
++MEMORY_REPORT := $(BUILD_DIR_ABS)/memory-report.txt
++SECTIONS_INFO := $(BUILD_DIR_ABS)/sections.info
 +
 +BOARD_MK := $(ECOS_SDK_HOME)/mk/boards/$(BOARD).mk
 +ifeq ($(wildcard $(BOARD_MK)),)
@@ -91,6 +100,7 @@ index 0000000..b50b049
 +OBJCOPY := $(CROSS)objcopy
 +OBJDUMP := $(CROSS)objdump
 +SED ?= sed
++AWK ?= awk
 +
 +ifeq ($(ECOS_INTERNAL_BUILD),1)
 +-include $(CONFIG_DIR_ABS)/configs/.config
@@ -162,7 +172,7 @@ index 0000000..b50b049
 +CFLAGS += -I$(PROJECT_DIR_ABS)/core/generated
 +endif
 +
-+.PHONY: all configure firmware clean check-inputs
++.PHONY: all configure firmware memory-report clean check-inputs
 +
 +all: configure
 +	@$(MAKE) --no-print-directory -f $(ECOS_SDK_HOME)/mk/ecos-firmware.mk \
@@ -176,9 +186,13 @@ index 0000000..b50b049
 +		CROSS="$(CROSS)" \
 +		FIRMWARE_NAME="$(FIRMWARE_NAME)" \
 +		COMPRESSED_MAP_ASSETS="$(COMPRESSED_MAP_ASSETS)" \
++		PSRAM_RUNTIME_BYTES="$(PSRAM_RUNTIME_BYTES)" \
 +		firmware
 +
 +check-inputs:
++	@case "$(PSRAM_RUNTIME_BYTES)" in \
++		""|*[!0-9]*) echo "PSRAM_RUNTIME_BYTES must be an unsigned decimal byte count" >&2; exit 1 ;; \
++	esac
 +	@test -f "$(PROJECT_DIR_ABS)/firmware/main.c" || \
 +		(echo "Missing project source: $(PROJECT_DIR_ABS)/firmware/main.c" >&2; exit 1)
 +	@test -f "$(DEFCONFIG_ABS)" || \
@@ -224,7 +238,109 @@ index 0000000..b50b049
 +	@$(SED) -i 's/@30000000/@00000000/g' "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).hex"
 +	@$(OBJCOPY) -O binary "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).bin"
 +	@$(OBJDUMP) -d "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" > "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME).txt"
++	@$(MAKE) --no-print-directory -f "$(ECOS_SDK_HOME)/mk/ecos-firmware.mk" memory-report
 +	@echo "Done: $(BUILD_DIR_ABS)/$(FIRMWARE_NAME)"
++
++memory-report: check-inputs
++	@for report_range in \
++		REPORT_FLASH_START="$(REPORT_FLASH_START)" \
++		REPORT_FLASH_SIZE="$(REPORT_FLASH_SIZE)" \
++		REPORT_SRAM_START="$(REPORT_SRAM_START)" \
++		REPORT_SRAM_SIZE="$(REPORT_SRAM_SIZE)" \
++		REPORT_PSRAM_START="$(REPORT_PSRAM_START)" \
++		REPORT_PSRAM_SIZE="$(REPORT_PSRAM_SIZE)"; do \
++		report_name=$${report_range%%=*}; \
++		report_value=$${report_range#*=}; \
++		if [ -z "$$report_value" ]; then \
++			echo "BOARD $(BOARD_NAME) does not define memory report ranges" >&2; exit 1; \
++		fi; \
++		case "$$report_value" in \
++			0x*|0X*) \
++				report_digits=$${report_value#0x}; report_digits=$${report_digits#0X}; \
++				case "$$report_digits" in ""|*[!0-9A-Fa-f]*) echo "$$report_name must be a decimal or hexadecimal value" >&2; exit 1 ;; esac ;; \
++			*) \
++				case "$$report_value" in *[!0-9]*) echo "$$report_name must be a decimal or hexadecimal value" >&2; exit 1 ;; esac ;; \
++		esac; \
++	done
++	@test -f "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" || \
++		(echo "Missing firmware ELF: $(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" >&2; exit 1)
++	@$(OBJDUMP) -h "$(BUILD_DIR_ABS)/$(FIRMWARE_NAME)" > "$(SECTIONS_INFO)"
++	@$(AWK) \
++		-v flash_start="$(REPORT_FLASH_START)" \
++		-v flash_size="$(REPORT_FLASH_SIZE)" \
++		-v sram_start="$(REPORT_SRAM_START)" \
++		-v sram_size="$(REPORT_SRAM_SIZE)" \
++		-v psram_start="$(REPORT_PSRAM_START)" \
++		-v psram_size="$(REPORT_PSRAM_SIZE)" \
++		-v psram_runtime="$(PSRAM_RUNTIME_BYTES)" '\
++	function fmt(bytes, sign) { \
++		sign = ""; \
++		if (bytes < 0) { sign = "-"; bytes = -bytes; } \
++		if (bytes < 1024) return sprintf("%s%d B", sign, bytes); \
++		if (bytes < 1048576) return sprintf("%s%.2f KB", sign, bytes / 1024); \
++		return sprintf("%s%.2f MB", sign, bytes / 1048576); \
++	} \
++	function account_allocated() { \
++		if ((candidate_name == ".text" || candidate_name == ".data") && candidate_lma >= flash_start && candidate_lma < flash_end) { \
++			if (candidate_name == ".text") text_size = candidate_size; \
++			if (candidate_name == ".data") data_size = candidate_size; \
++		} \
++		if (candidate_vma >= sram_start && candidate_vma < sram_end) { \
++			sram_sections += candidate_size; \
++			if (candidate_name == ".data") sram_data += candidate_size; \
++			if (candidate_name == ".bss") sram_bss += candidate_size; \
++		} \
++		if (candidate_vma >= psram_start && candidate_vma < psram_end) { \
++			psram_sections += candidate_size; \
++		} \
++	} \
++	function row(name, used, total, free) { \
++		free = total - used; \
++		printf "%-15s %-15s %-15s %-10s %-15s\n", name, fmt(used), fmt(total), sprintf("%.2f%%", (used / total) * 100), fmt(free); \
++	} \
++	BEGIN { \
++		flash_start = strtonum(flash_start); \
++		flash_total = strtonum(flash_size); \
++		flash_end = flash_start + flash_total; \
++		sram_start = strtonum(sram_start); \
++		sram_total = strtonum(sram_size); \
++		sram_end = sram_start + sram_total; \
++		psram_start = strtonum(psram_start); \
++		psram_total = strtonum(psram_size); \
++		psram_end = psram_start + psram_total; \
++		psram_runtime += 0; \
++	} \
++	/^[[:space:]]*[0-9]+[[:space:]]/ { \
++		candidate_name = $$2; \
++		candidate_size = strtonum("0x" $$3); \
++		candidate_vma = strtonum("0x" $$4); \
++		candidate_lma = strtonum("0x" $$5); \
++		next; \
++	} \
++	candidate_name != "" { \
++		if ($$0 ~ /(^|[[:space:],])ALLOC([[:space:],]|$$)/) account_allocated(); \
++		candidate_name = ""; \
++	} \
++	END { \
++		flash_used = text_size + data_size; \
++		psram_used = psram_sections + psram_runtime; \
++		print "------------------------------------------------------------------------------"; \
++		print "Memory Usage:"; \
++		print "--------------------------------------------------------------------------"; \
++		printf "%-15s %-15s %-15s %-10s %-15s\n", "Memory Region", "Used Size", "Total Size", "Usage %", "Free"; \
++		print "--------------------------------------------------------------------------"; \
++		row("FLASH", flash_used, flash_total); \
++		row("SRAM", sram_sections, sram_total); \
++		row("PSRAM", psram_used, psram_total); \
++		print "--------------------------------------------------------------------------"; \
++		print "RAM Details:"; \
++		print "  SRAM .data: " fmt(sram_data); \
++		print "  SRAM .bss:  " fmt(sram_bss); \
++		print "  PSRAM sections: " fmt(psram_sections); \
++		print "  PSRAM runtime:  " fmt(psram_runtime); \
++		print "------------------------------------------------------------------------------"; \
++	}' "$(SECTIONS_INFO)" > "$(MEMORY_REPORT)"
++	@cat "$(MEMORY_REPORT)"
 +
 +clean:
 +	rm -rf "$(BUILD_DIR_ABS)" "$(CONFIG_DIR_ABS)"
