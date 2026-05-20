@@ -30,7 +30,25 @@ int mc_write_bool(mc_writer_t *w, int value);
 int mc_write_varint(mc_writer_t *w, int32_t value);
 int mc_write_bytes(mc_writer_t *w, const uint8_t *src, size_t len);
 int mc_write_string(mc_writer_t *w, const char *str);
+size_t mc_packet_frame_len(size_t body_len);
 size_t mc_packet_wrap(const uint8_t *body, size_t body_len, uint8_t *dst, size_t dst_cap);
+size_t mc_packet_wrap_compressed_plain(const uint8_t *body,
+                                       size_t body_len,
+                                       uint8_t *dst,
+                                       size_t dst_cap);
+size_t mc_packet_wrap_compressed_payload(int32_t uncompressed_body_len,
+                                         const uint8_t *compressed_payload,
+                                         size_t compressed_payload_len,
+                                         uint8_t *dst,
+                                         size_t dst_cap);
 int mc_packet_try_read(const uint8_t *src, size_t src_len, mc_packet_t *packet);
+int mc_packet_get_compressed_body(const uint8_t *frame_body,
+                                  size_t frame_body_len,
+                                  const uint8_t **body,
+                                  size_t *body_len,
+                                  int32_t *data_len);
+size_t mc_packet_compressed_plain_frame_len(size_t body_len);
+size_t mc_packet_compressed_payload_frame_len(int32_t uncompressed_body_len,
+                                              size_t compressed_payload_len);
 
 #endif
