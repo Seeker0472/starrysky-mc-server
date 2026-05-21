@@ -150,6 +150,7 @@ index 0000000..b50b049
 +  $(PROJECT_DIR_ABS)/firmware/mc_link_session.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_uart0.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_psram.c \
++  $(PROJECT_DIR_ABS)/firmware/platform_gpio0.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_ecos.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_compat.c \
 +  $(shell find $(PROJECT_DIR_ABS)/core/src -name "*.c") \

@@ -1,5 +1,6 @@
 #include "platform_psram.h"
 #include "mc_firmware_config.h"
+#include "platform_gpio0.h"
 
 #if defined(__riscv)
 #include "board.h"
@@ -93,8 +94,7 @@ int platform_psram_init(void)
     REG_QSPI_0_DUM = 0u;
     REG_QSPI_0_CLKDIV = 1u;
 
-    REG_GPIO_0_DDR = 0u;
-    REG_GPIO_0_DR = 0u;
+    platform_gpio0_reset_shadow(0u, 0u);
 
     REG_PSRAM_0_WC = 18u;
     REG_PSRAM_0_CHD = 4u;
@@ -105,7 +105,7 @@ int platform_psram_init(void)
         return 0;
     }
 
-    REG_GPIO_0_DR = 0x8000u;
+    platform_gpio0_set_level_mask(PLATFORM_GPIO0_BIT_15, PLATFORM_GPIO0_BIT_15);
     REG_PSRAM_0_WC = 8u;
     REG_PSRAM_0_CHD = 0u;
     return 1;

@@ -43,6 +43,7 @@ stdenv.mkDerivation {
       native/tests/test_server_trace.c \
       native/tests/test_platform_uart0.c \
       native/tests/test_platform_psram.c \
+      native/tests/test_platform_gpio0.c \
       core/src/mc_ringbuf.c \
       core/src/mc_varint.c \
       core/src/mc_packet.c \
@@ -54,6 +55,7 @@ stdenv.mkDerivation {
       core/src/mc_server.c \
       firmware/mc_log.c \
       firmware/platform_uart0.c \
+      firmware/platform_gpio0.c \
       firmware/platform_psram.c \
       -o build/native/mc_uart_tests
     ./build/native/mc_uart_tests
@@ -96,10 +98,12 @@ EOF
       native/tests/test_firmware_config.c native/tests/test_log_capture.c native/tests/test_mc_log_info.c \
       native/tests/test_mc_log_off.c native/tests/test_mc_log_debug.c native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c native/tests/test_platform_uart0.c native/tests/test_platform_psram.c \
+      native/tests/test_platform_gpio0.c \
       core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_commands.c \
       core/src/mc_link.c \
       firmware/mc_link_session.c core/src/mc_world.c core/src/mc_world_compressed.c \
-      core/src/mc_server.c firmware/mc_log.c firmware/platform_uart0.c firmware/platform_psram.c \
+      core/src/mc_server.c firmware/mc_log.c firmware/platform_uart0.c firmware/platform_gpio0.c \
+      firmware/platform_psram.c \
       -o build/native/mc_uart_tests_protocol_compression
     ./build/native/mc_uart_tests_protocol_compression
 
@@ -221,11 +225,12 @@ EOF
       native/tests/test_firmware_config.c native/tests/test_log_capture.c native/tests/test_mc_log_info.c \
       native/tests/test_mc_log_off.c native/tests/test_mc_log_debug.c native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c native/tests/test_platform_uart0.c native/tests/test_platform_psram.c \
+      native/tests/test_platform_gpio0.c \
       core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_commands.c \
       core/src/mc_link.c \
       firmware/mc_link_session.c core/src/mc_world.c core/src/mc_world_compressed.c \
       core/generated/mc_world_compressed_assets.c core/src/mc_server.c firmware/mc_log.c \
-      firmware/platform_uart0.c firmware/platform_psram.c \
+      firmware/platform_uart0.c firmware/platform_gpio0.c firmware/platform_psram.c \
       -o build/native/mc_uart_tests_compression
     ./build/native/mc_uart_tests_compression
 
@@ -235,6 +240,7 @@ EOF
       -DMC_PSRAM_FLOW_TEST_BYTES=8388612u \
       -DMC_TEST_PSRAM_OVERSIZE_FLOW_BYTES=1 \
       native/tests/test_platform_psram.c \
+      firmware/platform_gpio0.c \
       firmware/platform_psram.c \
       -o build/native/psram_oversize_flow_test
     ./build/native/psram_oversize_flow_test
