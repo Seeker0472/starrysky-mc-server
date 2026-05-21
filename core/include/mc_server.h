@@ -22,7 +22,10 @@ typedef enum {
     MC_TRACE_PLAY_ENTER = 5,
     MC_TRACE_BOOTSTRAP_STAGE = 7,
     MC_TRACE_BOOTSTRAP_DONE = 8,
-    MC_TRACE_QUEUE_FULL = 9
+    MC_TRACE_QUEUE_FULL = 9,
+    MC_TRACE_KEEPALIVE_SEND = 10,
+    MC_TRACE_KEEPALIVE_ACK = 11,
+    MC_TRACE_PLAY_UNHANDLED = 12
 } mc_trace_event_type_t;
 
 typedef struct {
@@ -52,6 +55,15 @@ typedef struct {
     int32_t compression_threshold;
     char username[MC_MAX_USERNAME + 1u];
     uint32_t ticks;
+    uint32_t last_keepalive_tick;
+    int32_t keepalive_id;
+    uint8_t keepalive_pending;
+    double player_x;
+    double player_y;
+    double player_z;
+    float player_yaw;
+    float player_pitch;
+    uint8_t player_on_ground;
     int play_bootstrap_sent;
     uint8_t rx_accum[MC_MAX_PACKET_BODY + 8u];
     size_t rx_accum_len;
@@ -65,6 +77,7 @@ typedef struct {
 void mc_server_init(mc_server_t *server);
 void mc_server_set_trace(mc_server_t *server, mc_trace_sink_t sink, void *user);
 int mc_server_receive(mc_server_t *server, const uint8_t *bytes, size_t len, mc_ringbuf_t *tx);
+int mc_server_tick_at(mc_server_t *server, mc_ringbuf_t *tx, uint32_t now_ticks);
 int mc_server_tick(mc_server_t *server, mc_ringbuf_t *tx);
 int mc_server_queue_packet(mc_ringbuf_t *tx, const uint8_t *body, size_t body_len);
 int mc_server_take_tx_reset(mc_server_t *server);

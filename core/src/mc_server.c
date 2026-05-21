@@ -70,6 +70,68 @@ static int read_string_body(const uint8_t *body, size_t body_len, size_t *pos, c
     return 1;
 }
 
+static int read_bool_body(const uint8_t *body, size_t body_len, size_t *pos, uint8_t *value)
+{
+    if (*pos >= body_len) {
+        return 0;
+    }
+    *value = body[*pos] ? 1u : 0u;
+    (*pos)++;
+    return 1;
+}
+
+static int read_u32_body(const uint8_t *body, size_t body_len, size_t *pos, uint32_t *value)
+{
+    if (*pos > body_len || body_len - *pos < 4u) {
+        return 0;
+    }
+    *value = ((uint32_t)body[*pos] << 24) |
+             ((uint32_t)body[*pos + 1u] << 16) |
+             ((uint32_t)body[*pos + 2u] << 8) |
+             (uint32_t)body[*pos + 3u];
+    *pos += 4u;
+    return 1;
+}
+
+static int read_u64_body(const uint8_t *body, size_t body_len, size_t *pos, uint64_t *value)
+{
+    uint64_t v = 0u;
+    if (*pos > body_len || body_len - *pos < 8u) {
+        return 0;
+    }
+    for (size_t i = 0; i < 8u; i++) {
+        v = (v << 8) | (uint64_t)body[*pos + i];
+    }
+    *value = v;
+    *pos += 8u;
+    return 1;
+}
+
+static int read_f32_body(const uint8_t *body, size_t body_len, size_t *pos, float *value)
+{
+    union { float f; uint32_t u; } u;
+    if (!read_u32_body(body, body_len, pos, &u.u)) {
+        return 0;
+    }
+    *value = u.f;
+    return 1;
+}
+
+static int read_f64_body(const uint8_t *body, size_t body_len, size_t *pos, double *value)
+{
+    union { double d; uint64_t u; } u;
+    if (!read_u64_body(body, body_len, pos, &u.u)) {
+        return 0;
+    }
+    *value = u.d;
+    return 1;
+}
+
+static uint32_t elapsed_ticks(uint32_t now_ticks, uint32_t then_ticks)
+{
+    return now_ticks - then_ticks;
+}
+
 int mc_server_queue_packet(mc_ringbuf_t *tx, const uint8_t *body, size_t body_len)
 {
     uint8_t prefix[5];
@@ -245,6 +307,29 @@ static int queue_position(const mc_server_t *server, mc_ringbuf_t *tx)
            queue_packet_auto(server, tx, body, w.len);
 }
 
+static int queue_keepalive(const mc_server_t *server, mc_ringbuf_t *tx, int32_t keepalive_id)
+{
+    uint8_t body[16];
+    mc_writer_t w;
+    mc_writer_init(&w, body, sizeof(body));
+    return mc_write_varint(&w, 0x00) &&
+           mc_write_varint(&w, keepalive_id) &&
+           queue_packet_auto(server, tx, body, w.len);
+}
+
+static void reset_play_runtime_state(mc_server_t *server)
+{
+    server->last_keepalive_tick = 0u;
+    server->keepalive_id = 0;
+    server->keepalive_pending = 0u;
+    server->player_x = 0.5;
+    server->player_y = 6.0;
+    server->player_z = 0.5;
+    server->player_yaw = 0.0f;
+    server->player_pitch = 0.0f;
+    server->player_on_ground = 0u;
+}
+
 #if MC_PROTOCOL_COMPRESSION_ENABLE && !MC_USE_PSRAM_COMPRESSED_MAP
 static int queue_spawn_chunk_auto(const mc_server_t *server, mc_ringbuf_t *tx, size_t index)
 {
@@ -274,6 +359,7 @@ void mc_server_init(mc_server_t *server)
     server->state = MC_CONN_HANDSHAKE;
     server->compression_enabled = 0;
     server->compression_threshold = (int32_t)MC_COMPRESSION_THRESHOLD;
+    reset_play_runtime_state(server);
 }
 
 void mc_server_set_trace(mc_server_t *server, mc_trace_sink_t sink, void *user)
@@ -310,6 +396,38 @@ static void reset_logical_session(mc_server_t *server)
     server->play_bootstrap_stage = 0;
     server->play_bootstrap_chunk_index = 0;
     server->tx_reset_requested = 1;
+    reset_play_runtime_state(server);
+}
+
+static int tick_keepalive(mc_server_t *server, mc_ringbuf_t *tx, uint32_t now_ticks)
+{
+    int32_t keepalive_id = server->keepalive_id;
+
+    if (server->state != MC_CONN_PLAY || !server->play_bootstrap_sent) {
+        return 1;
+    }
+    if (server->last_keepalive_tick != 0u &&
+        elapsed_ticks(now_ticks, server->last_keepalive_tick) < MC_KEEPALIVE_INTERVAL_TICKS) {
+        return 1;
+    }
+    if (server->keepalive_id >= INT32_MAX) {
+        keepalive_id = 1;
+    } else {
+        keepalive_id = server->keepalive_id + 1;
+    }
+    if (!queue_keepalive(server, tx, keepalive_id)) {
+        return 0;
+    }
+    server->keepalive_id = keepalive_id;
+    server->keepalive_pending = 1u;
+    server->last_keepalive_tick = now_ticks;
+    emit_trace(server,
+               MC_TRACE_KEEPALIVE_SEND,
+               keepalive_id,
+               0,
+               0,
+               mc_ringbuf_len(tx));
+    return 1;
 }
 
 typedef enum {
@@ -349,6 +467,67 @@ static mc_handshake_result_t try_handle_handshake(mc_server_t *server, const mc_
     }
     emit_trace(server, MC_TRACE_HANDSHAKE, next_state, proto, host, strlen(host));
     return MC_HANDSHAKE_ACCEPTED;
+}
+
+static int handle_play_movement(mc_server_t *server,
+                                int32_t packet_id,
+                                const uint8_t *body,
+                                size_t body_len,
+                                size_t pos)
+{
+    double x = server->player_x;
+    double y = server->player_y;
+    double z = server->player_z;
+    float yaw = server->player_yaw;
+    float pitch = server->player_pitch;
+    uint8_t on_ground = server->player_on_ground;
+
+    switch (packet_id) {
+    case 0x03:
+        if (!read_bool_body(body, body_len, &pos, &on_ground)) {
+            return 0;
+        }
+        break;
+    case 0x04:
+        if (!read_f64_body(body, body_len, &pos, &x) ||
+            !read_f64_body(body, body_len, &pos, &y) ||
+            !read_f64_body(body, body_len, &pos, &z) ||
+            !read_bool_body(body, body_len, &pos, &on_ground)) {
+            return 0;
+        }
+        break;
+    case 0x05:
+        if (!read_f32_body(body, body_len, &pos, &yaw) ||
+            !read_f32_body(body, body_len, &pos, &pitch) ||
+            !read_bool_body(body, body_len, &pos, &on_ground)) {
+            return 0;
+        }
+        break;
+    case 0x06:
+        if (!read_f64_body(body, body_len, &pos, &x) ||
+            !read_f64_body(body, body_len, &pos, &y) ||
+            !read_f64_body(body, body_len, &pos, &z) ||
+            !read_f32_body(body, body_len, &pos, &yaw) ||
+            !read_f32_body(body, body_len, &pos, &pitch) ||
+            !read_bool_body(body, body_len, &pos, &on_ground)) {
+            return 0;
+        }
+        break;
+    default:
+        return 0;
+    }
+
+    if (pos != body_len) {
+        return 0;
+    }
+
+    server->player_x = x;
+    server->player_y = y;
+    server->player_z = z;
+    server->player_yaw = yaw;
+    server->player_pitch = pitch;
+    server->player_on_ground = on_ground;
+    return 1;
 }
 
 static int handle_packet(mc_server_t *server, const mc_packet_t *packet, mc_ringbuf_t *tx)
@@ -435,6 +614,41 @@ static int handle_packet(mc_server_t *server, const mc_packet_t *packet, mc_ring
         server->state = MC_CONN_PLAY;
         emit_trace(server, MC_TRACE_PLAY_ENTER, 0, 0, server->username, strlen(server->username));
         return 1;
+    }
+
+    if (server->state == MC_CONN_PLAY && packet_id == 0x00) {
+        int32_t keepalive_id = 0;
+        if (!read_varint_body(packet->body, packet->body_len, &pos, &keepalive_id) ||
+            pos != packet->body_len) {
+            return 0;
+        }
+        if (server->keepalive_pending) {
+            emit_trace(server,
+                       MC_TRACE_KEEPALIVE_ACK,
+                       keepalive_id,
+                       0,
+                       0,
+                       0u);
+            server->keepalive_pending = 0u;
+        }
+        return 1;
+    }
+
+    if (server->state == MC_CONN_PLAY &&
+        (packet_id == 0x03 || packet_id == 0x04 || packet_id == 0x05 || packet_id == 0x06)) {
+        if (!handle_play_movement(server, packet_id, packet->body, packet->body_len, pos)) {
+            return 0;
+        }
+        return 1;
+    }
+
+    if (server->state == MC_CONN_PLAY) {
+        emit_trace(server,
+                   MC_TRACE_PLAY_UNHANDLED,
+                   packet_id,
+                   (int32_t)packet->body_len,
+                   0,
+                   0u);
     }
 
     return 1;
@@ -579,7 +793,7 @@ int mc_server_take_tx_reset(mc_server_t *server)
     return requested;
 }
 
-int mc_server_tick(mc_server_t *server, mc_ringbuf_t *tx)
+int mc_server_tick_at(mc_server_t *server, mc_ringbuf_t *tx, uint32_t now_ticks)
 {
     server->ticks++;
     if (server->state == MC_CONN_PLAY && !server->play_bootstrap_sent) {
@@ -663,5 +877,10 @@ int mc_server_tick(mc_server_t *server, mc_ringbuf_t *tx)
                        0u);
         }
     }
-    return 1;
+    return tick_keepalive(server, tx, now_ticks);
+}
+
+int mc_server_tick(mc_server_t *server, mc_ringbuf_t *tx)
+{
+    return mc_server_tick_at(server, tx, server->ticks + 1u);
 }
