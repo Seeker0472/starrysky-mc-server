@@ -38,11 +38,15 @@
 | Login | clientbound | `0x03` | Set Compression |
 | Play | clientbound | `0x00` | KeepAlive |
 | Play | clientbound | `0x01` | Join Game |
+| Play | serverbound | `0x01` | Chat Message |
+| Play | clientbound | `0x02` | Chat Message |
 | Play | clientbound | `0x03` | Time Update |
 | Play | clientbound | `0x05` | Spawn Position |
 | Play | clientbound | `0x06` | Update Health |
 | Play | clientbound | `0x08` | Player Position And Look |
 | Play | clientbound | `0x21` | Chunk Data |
+| Play | clientbound | `0x2b` | Change Game State |
+| Play | clientbound | `0x39` | Player Abilities |
 | Play | serverbound | `0x00` | KeepAlive ACK |
 | Play | serverbound | `0x03..0x06` | movement packets，bridge 会过滤 |
 

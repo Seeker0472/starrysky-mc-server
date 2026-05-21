@@ -39,7 +39,7 @@ Minecraft 服务端状态机支持四个状态：
 - `MC_CONN_LOGIN`
 - `MC_CONN_PLAY`
 
-Login 后默认进入压缩模式。Play bootstrap 分阶段发送 Join Game、Spawn Position、Time、Health、Player Position And Look 和 3x3 spawn chunks。bootstrap 完成后，服务器按 `MC_KEEPALIVE_INTERVAL_TICKS` 发送 KeepAlive。KeepAlive ACK 会清除诊断用 pending 标记，但服务端不会因为 missed ACK 主动断开会话。
+Login 后默认进入压缩模式。Play bootstrap 分阶段发送 Join Game、Spawn Position、Time、Health、Player Abilities、Player Position And Look 和 3x3 spawn chunks。默认位置是 `x=0.5 y=32.0 z=0.5`，客户端获得 flying/allow flying 状态，用高处观察点便于检查地图。bootstrap 完成后，服务器按 `MC_KEEPALIVE_INTERVAL_TICKS` 发送 KeepAlive。KeepAlive ACK 会清除诊断用 pending 标记，但服务端不会因为 missed ACK 主动断开会话。
 
 ## Firmware
 
@@ -71,6 +71,8 @@ Bridge 发来 RESET 时，固件只重置 link/Minecraft 逻辑状态，不需�
 Bridge 对 PC-to-firmware DATA 使用 stop-and-wait。每次只允许一个 outstanding DATA_C2M，收到 ACK 后再从 pending TCP 队列弹出对应字节。若超时，bridge 按当前速率 profile 重传；连续丢失会触发重新校准。
 
 Minecraft 1.8 客户端会高频发送 serverbound movement 包。低速 UART 不能长期承载这些空闲上报，所以 bridge 在 Minecraft frame 层解析并丢弃 packet id `0x03..0x06`。解析失败时采用 fail-open：把当前缓冲转发给固件，避免过滤器误删未知数据。
+
+Play 阶段处理 serverbound Chat Message。非 `/` 消息回显给当前单客户端；`/help`、`/spawn`、`/tp`、`/pos`、`/time`、`/weather` 由 [core/src/mc_commands.c](../core/src/mc_commands.c) 解析。[core/src/mc_server.c](../core/src/mc_server.c) 把解析结果转换成 chat、teleport、time 和 weather clientbound packets。`/pos` 显示服务端已知位置，不保证是实时客户端坐标，因为 bridge 会过滤大部分 movement spam。
 
 ## UART Link V2
 

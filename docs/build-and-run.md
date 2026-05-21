@@ -128,6 +128,17 @@ Windows bridge 示例：
 
 如果固件使用了非默认 `MC_UART0_BAUD` 或 `MC_UART1_BAUD`，bridge 的 `--baud` 必须和 `MC_BRIDGE_UART_ID` 指向的 UART 波特率一致。
 
+## 游戏内命令
+
+- 普通聊天消息会回显给自己。
+- `/help` 列出命令。
+- `/spawn` 回到观察点 `0.5 32.0 0.5`。
+- `/tp <x> <y> <z>` 传送到指定坐标。
+- `/pos` 显示服务端已知位置；由于 bridge 会过滤 movement spam，它不是实时客户端坐标。
+- `/time day|noon|night|midnight|<ticks>` 设置客户端视觉时间。
+- `/weather clear|rain|thunder` 设置客户端视觉天气。
+- time/weather 只影响当前客户端显示；固件不模拟昼夜推进、天气循环、生物或物理。
+
 ## 导出 Bridge 日志
 
 PowerShell 直接管道 native stderr 有时会显示 `NativeCommandError` 样式的包装信息。推荐通过 `cmd /c` 收集 stdout/stderr，并把日志写到当前目录：
