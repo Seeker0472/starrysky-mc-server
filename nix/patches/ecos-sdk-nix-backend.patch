@@ -146,8 +146,10 @@ index 0000000..b50b049
 +SRC_PATH := \
 +  $(BOARD_STARTUP) \
 +  $(PROJECT_DIR_ABS)/firmware/main.c \
++  $(PROJECT_DIR_ABS)/firmware/mc_activity_led.c \
 +  $(PROJECT_DIR_ABS)/firmware/mc_log.c \
 +  $(PROJECT_DIR_ABS)/firmware/mc_link_session.c \
++  $(PROJECT_DIR_ABS)/firmware/platform_activity_led.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_uart0.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_psram.c \
 +  $(PROJECT_DIR_ABS)/firmware/platform_gpio0.c \

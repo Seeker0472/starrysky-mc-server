@@ -44,6 +44,7 @@ stdenv.mkDerivation {
       native/tests/test_platform_uart0.c \
       native/tests/test_platform_psram.c \
       native/tests/test_platform_gpio0.c \
+      native/tests/test_activity_led.c \
       core/src/mc_ringbuf.c \
       core/src/mc_varint.c \
       core/src/mc_packet.c \
@@ -57,6 +58,8 @@ stdenv.mkDerivation {
       firmware/platform_uart0.c \
       firmware/platform_gpio0.c \
       firmware/platform_psram.c \
+      firmware/platform_activity_led.c \
+      firmware/mc_activity_led.c \
       -o build/native/mc_uart_tests
     ./build/native/mc_uart_tests
 
@@ -98,12 +101,12 @@ EOF
       native/tests/test_firmware_config.c native/tests/test_log_capture.c native/tests/test_mc_log_info.c \
       native/tests/test_mc_log_off.c native/tests/test_mc_log_debug.c native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c native/tests/test_platform_uart0.c native/tests/test_platform_psram.c \
-      native/tests/test_platform_gpio0.c \
+      native/tests/test_platform_gpio0.c native/tests/test_activity_led.c \
       core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_commands.c \
       core/src/mc_link.c \
       firmware/mc_link_session.c core/src/mc_world.c core/src/mc_world_compressed.c \
       core/src/mc_server.c firmware/mc_log.c firmware/platform_uart0.c firmware/platform_gpio0.c \
-      firmware/platform_psram.c \
+      firmware/platform_psram.c firmware/platform_activity_led.c firmware/mc_activity_led.c \
       -o build/native/mc_uart_tests_protocol_compression
     ./build/native/mc_uart_tests_protocol_compression
 
@@ -225,12 +228,13 @@ EOF
       native/tests/test_firmware_config.c native/tests/test_log_capture.c native/tests/test_mc_log_info.c \
       native/tests/test_mc_log_off.c native/tests/test_mc_log_debug.c native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c native/tests/test_platform_uart0.c native/tests/test_platform_psram.c \
-      native/tests/test_platform_gpio0.c \
+      native/tests/test_platform_gpio0.c native/tests/test_activity_led.c \
       core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_commands.c \
       core/src/mc_link.c \
       firmware/mc_link_session.c core/src/mc_world.c core/src/mc_world_compressed.c \
       core/generated/mc_world_compressed_assets.c core/src/mc_server.c firmware/mc_log.c \
       firmware/platform_uart0.c firmware/platform_gpio0.c firmware/platform_psram.c \
+      firmware/platform_activity_led.c firmware/mc_activity_led.c \
       -o build/native/mc_uart_tests_compression
     ./build/native/mc_uart_tests_compression
 
@@ -244,6 +248,37 @@ EOF
       firmware/platform_psram.c \
       -o build/native/psram_oversize_flow_test
     ./build/native/psram_oversize_flow_test
+
+    cat > build/native/activity_led_disabled_test.c <<'EOF'
+    #include "mc_activity_led.h"
+    #include "platform_gpio0.h"
+    #include "mc_config.h"
+    #include <stdint.h>
+
+    #define ASSERT_EQ(a, b) do { if ((a) != (b)) return 1; } while (0)
+
+    int main(void)
+    {
+      platform_gpio0_reset_shadow(0xffffffffu, PLATFORM_GPIO0_BIT_15);
+      mc_activity_led_init(0u);
+      mc_activity_led_observe_bytes(1024u);
+      mc_activity_led_tick(MC_SERVER_TICKS_PER_SECOND);
+      ASSERT_EQ(platform_gpio0_ddr_shadow(), 0xffffffffu);
+      ASSERT_EQ(platform_gpio0_dr_shadow(), PLATFORM_GPIO0_BIT_15);
+      return 0;
+    }
+EOF
+
+    cc -std=c11 -Wall -Wextra -Werror -O2 \
+      -DMC_UART_ACTIVITY_LED_ENABLE=0 \
+      -Icore/include \
+      -Ifirmware \
+      build/native/activity_led_disabled_test.c \
+      firmware/mc_activity_led.c \
+      firmware/platform_activity_led.c \
+      firmware/platform_gpio0.c \
+      -o build/native/activity_led_disabled_test
+    ./build/native/activity_led_disabled_test
 
     cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
       -DMC_BRIDGE_UART_ID=MC_UART_ID_1 \

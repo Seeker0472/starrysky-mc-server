@@ -20,6 +20,7 @@ int test_firmware_main(void);
 int test_platform_uart0(void);
 int test_platform_psram(void);
 int test_platform_gpio0(void);
+int test_activity_led(void);
 
 static int run_test(const char *name, int (*fn)(void))
 {
@@ -55,5 +56,6 @@ int main(void)
     failed |= run_test("platform_uart0", test_platform_uart0);
     failed |= run_test("platform_psram", test_platform_psram);
     failed |= run_test("platform_gpio0", test_platform_gpio0);
+    failed |= run_test("activity_led", test_activity_led);
     return failed ? 1 : 0;
 }
