@@ -3,6 +3,7 @@
 int test_ringbuf(void);
 int test_varint(void);
 int test_packet(void);
+int test_commands(void);
 int test_link_codec(void);
 int test_link_session(void);
 int test_server_status(void);
@@ -36,6 +37,7 @@ int main(void)
     failed |= run_test("ringbuf", test_ringbuf);
     failed |= run_test("varint", test_varint);
     failed |= run_test("packet", test_packet);
+    failed |= run_test("commands", test_commands);
     failed |= run_test("link_codec", test_link_codec);
     failed |= run_test("link_session", test_link_session);
     failed |= run_test("server_status", test_server_status);

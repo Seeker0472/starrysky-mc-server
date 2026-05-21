@@ -27,6 +27,7 @@ stdenv.mkDerivation {
       native/tests/test_ringbuf.c \
       native/tests/test_varint.c \
       native/tests/test_packet.c \
+      native/tests/test_commands.c \
       native/tests/test_link_codec.c \
       native/tests/test_link_session.c \
       native/tests/test_server_status.c \
@@ -45,6 +46,7 @@ stdenv.mkDerivation {
       core/src/mc_ringbuf.c \
       core/src/mc_varint.c \
       core/src/mc_packet.c \
+      core/src/mc_commands.c \
       core/src/mc_link.c \
       firmware/mc_link_session.c \
       core/src/mc_world.c \
@@ -88,12 +90,14 @@ EOF
       -Icore/include -Ifirmware \
       build/native/protocol_compression_test_main.c \
       native/tests/test_ringbuf.c native/tests/test_varint.c native/tests/test_packet.c \
+      native/tests/test_commands.c \
       native/tests/test_link_codec.c native/tests/test_link_session.c native/tests/test_server_status.c \
       native/tests/test_server_login.c native/tests/test_world.c native/tests/test_integration.c \
       native/tests/test_firmware_config.c native/tests/test_log_capture.c native/tests/test_mc_log_info.c \
       native/tests/test_mc_log_off.c native/tests/test_mc_log_debug.c native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c native/tests/test_platform_uart0.c native/tests/test_platform_psram.c \
-      core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_link.c \
+      core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_commands.c \
+      core/src/mc_link.c \
       firmware/mc_link_session.c core/src/mc_world.c core/src/mc_world_compressed.c \
       core/src/mc_server.c firmware/mc_log.c firmware/platform_uart0.c firmware/platform_psram.c \
       -o build/native/mc_uart_tests_protocol_compression
@@ -211,12 +215,14 @@ EOF
       -Icore/include -Icore/generated -Ifirmware \
       build/native/compression_test_main.c \
       native/tests/test_ringbuf.c native/tests/test_varint.c native/tests/test_packet.c \
+      native/tests/test_commands.c \
       native/tests/test_link_codec.c native/tests/test_link_session.c native/tests/test_server_status.c \
       native/tests/test_server_login.c native/tests/test_world.c native/tests/test_integration.c \
       native/tests/test_firmware_config.c native/tests/test_log_capture.c native/tests/test_mc_log_info.c \
       native/tests/test_mc_log_off.c native/tests/test_mc_log_debug.c native/tests/test_mc_log_trace.c \
       native/tests/test_server_trace.c native/tests/test_platform_uart0.c native/tests/test_platform_psram.c \
-      core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_link.c \
+      core/src/mc_ringbuf.c core/src/mc_varint.c core/src/mc_packet.c core/src/mc_commands.c \
+      core/src/mc_link.c \
       firmware/mc_link_session.c core/src/mc_world.c core/src/mc_world_compressed.c \
       core/generated/mc_world_compressed_assets.c core/src/mc_server.c firmware/mc_log.c \
       firmware/platform_uart0.c firmware/platform_psram.c \
