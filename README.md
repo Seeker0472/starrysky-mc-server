@@ -4,6 +4,8 @@
 
 默认发布配置面向 Minecraft Java 1.8.x / protocol 47，离线模式，单人，启用协议压缩。主机侧 Rust bridge 监听 `127.0.0.1:25565`，把 TCP 字节流转换成项目自定义的 UART link v2 帧；板卡固件在 UART0/SYS_UART/type-c 上接收桥接数据，在 UART1/HP_UART 上输出日志。
 
+![Minecraft 1.8.1 连接 StarrySky C2 固件服务器后的展示地图](docs/assets/minecraft-demo.png)
+
 ## 运行架构
 
 ```text
@@ -35,6 +37,7 @@ Firmware logs
 - 内存：片上 SRAM 128 KiB，外部 PSRAM 8 MiB。
 - 默认 bridge UART：UART0/SYS_UART/type-c，115200 baud。
 - 默认 log UART：UART1/HP_UART，115200 baud。
+- 默认 UART activity LED：启用，使用板卡 `GPIO_0` active-low 指示 bridge UART RX+TX 流量。
 - Minecraft：Java Edition 1.8.x，protocol 47。
 - 服务端模式：offline，无加密，单人。
 - 默认地图：`maps/showcase.png` 编译成 3x3 spawn chunks，离线 zlib 压缩后在启动时复制到 PSRAM；未提供 PNG 时回退到 superflat 风格。
@@ -146,9 +149,12 @@ UART link v2：
 #define MC_BRIDGE_UART_ID MC_UART_ID_0
 #define MC_LOG_UART_ID MC_UART_ID_1
 #define MC_LOG_LEVEL MC_LOG_INFO
+#define MC_UART_ACTIVITY_LED_ENABLE 1
 ```
 
 `MC_BRIDGE_UART_ID` 和 `MC_LOG_UART_ID` 必须不同，避免日志字节污染 bridge 数据链路。
+
+`MC_UART_ACTIVITY_LED_ENABLE` 默认为 `1`。启用时，固件把 bridge UART RX 和 TX 字节合并到 100ms 采样窗口里，并按流量选择约 1Hz、3Hz、6Hz 的闪烁速率；空闲窗口保持 LED 熄灭。该功能只在状态变化时写 GPIO，不会按每个 UART 字节翻转 LED。设为 `0` 时 LED 模块编译为 no-op，不配置也不写 `GPIO_0`。
 
 日志级别：
 
@@ -165,4 +171,4 @@ nix build .#log-debug
 
 ## 参考来源
 
-Minecraft 1.8、StarrySky C2、ECOS SDK 和本项目协议选择的来源见 [docs/protocol/references.md](docs/protocol/references.md)。
+StarrySky C2 Pico 官方板卡文档见 [OpenECOS StarrySky C v2.0 Pico](https://embedded.openecos.com/zh-cn/latest/page/brd/starry-sky-c/v2.0_pico/)。Minecraft 1.8、StarrySky C2、ECOS SDK 和本项目协议选择的更多来源见 [docs/protocol/references.md](docs/protocol/references.md)。

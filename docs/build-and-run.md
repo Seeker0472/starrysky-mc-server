@@ -128,6 +128,16 @@ Windows bridge 示例：
 
 如果固件使用了非默认 `MC_UART0_BAUD` 或 `MC_UART1_BAUD`，bridge 的 `--baud` 必须和 `MC_BRIDGE_UART_ID` 指向的 UART 波特率一致。
 
+默认固件还会用板卡 `GPIO_0` 作为 UART activity LED。Bridge UART 有 RX 或 TX 字节流动时，LED 会按最近 100ms 窗口内的合计字节数闪烁：低流量约 1Hz，中等流量约 3Hz，高流量约 6Hz；空闲时熄灭。这个指示只反映 firmware bridge UART 流量，不代表 Minecraft tick rate 或客户端帧率。
+
+如需关闭该行为，在自定义固件 profile 的 `extraCFlags` 中加入：
+
+```bash
+-DMC_UART_ACTIVITY_LED_ENABLE=0
+```
+
+禁用后 `mc_activity_led_*` 接口为 no-op，固件不会配置或写入 `GPIO_0`。需要复用 `GPIO_0` 或排查板卡 GPIO/PSRAM 相关问题时可以关闭。
+
 ## 游戏内命令
 
 - 普通聊天消息会回显给自己。

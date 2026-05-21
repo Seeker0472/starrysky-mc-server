@@ -12,6 +12,7 @@
 - Compression threshold：默认 `8192`。
 - Players：1。
 - World：固定 3x3 superflat spawn chunks。
+- UART activity LED：默认启用，使用 StarrySky C2 的 `GPIO_0` active-low 指示 bridge UART RX+TX 流量；可通过 `MC_UART_ACTIVITY_LED_ENABLE=0` 禁用。
 - Link protocol：本项目自定义 UART link v2，COBS + CRC16 + `0x00` delimiter；完整说明见 [UART Link V2](uart-link-v2.md)。
 
 ## Minecraft 1.8
@@ -54,6 +55,7 @@
 
 - ECOS SDK upstream：<https://github.com/openecos-projects/embedded-sdk>
 - ECOS documentation upstream：<https://github.com/openecos-projects/embedded-doc>
+- StarrySky C2 Pico official board documentation：<https://embedded.openecos.com/zh-cn/latest/page/brd/starry-sky-c/v2.0_pico/>
 - StarrySky C2 Pico board overview：<https://github.com/openecos-projects/embedded-doc/blob/main/doc/src/zh/page/brd/starry-sky-c/v2.0_pico.md>
 - ECOS SDK v2.0 start guide：<https://github.com/openecos-projects/embedded-doc/blob/main/doc/src/zh/page/sdk/v2.0/start/introduction.md>
 - HP_UART API：<https://github.com/openecos-projects/embedded-doc/blob/main/doc/src/zh/page/sdk/v2.0/api/hp_uart.md>
@@ -89,6 +91,7 @@
 - 固件主循环：`firmware/main.c`。
 - 固件 link session：`firmware/mc_link_session.c`。
 - PSRAM 初始化：`firmware/platform_psram.c`。
+- GPIO0 shadow 和 UART activity LED：`firmware/platform_gpio0.c`、`firmware/platform_activity_led.c`、`firmware/mc_activity_led.c`。
 - Nix 固件构建：`nix/ecos-firmware.nix`。
 - native tests：`nix/native-tests.nix`。
 
@@ -97,4 +100,5 @@
 - 修改 Minecraft packet id 或字段时，更新本文表格、相关 tests 和实现。
 - 修改 link v2 常量时，同步 C/Rust codec 和 tests。
 - 修改 UART/PSRAM 寄存器时，引用 ECOS SDK 上游资料或 `board.h`。
+- 修改 GPIO0、板卡 LED 或 UART activity LED 行为时，同步 [README.md](../../README.md)、[docs/architecture.md](../architecture.md) 和 [docs/build-and-run.md](../build-and-run.md)。
 - 修改构建输出或 profile 时，同步 [README.md](../../README.md)、[docs/build-and-run.md](../build-and-run.md) 和 [docs/compressed-map-psram.md](../compressed-map-psram.md)。

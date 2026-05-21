@@ -15,4 +15,4 @@
 - 写架构事实时引用当前源码路径，不用旧日志或记忆替代。
 - 写构建命令时必须能在当前仓库根目录运行。
 - 写资源占用时优先指向 `result/memory-report.txt`，不要固化某次构建的临时数字。
-- 修改 Minecraft packet id、UART link 常量、固件 profile 或 Nix 输出时，同步更新对应文档。
+- 修改 Minecraft packet id、UART link 常量、固件 profile、板卡 GPIO 行为、README 展示资产或 Nix 输出时，同步更新对应文档。

@@ -48,15 +48,38 @@ Login 后默认进入压缩模式。Play bootstrap 分阶段发送 Join Game、S
 1. `pump_link_rx()` 从 bridge UART 读取 link v2 字节，解析 C2M DATA、RESET、RATE_PROBE 等帧。
 2. `pump_server()` 从 RX ring 取 Minecraft 字节交给 `mc_server_receive()`，再调用 `mc_server_tick_at()` 推进 bootstrap 和 KeepAlive。
 3. `pump_link_tx()` 把服务器 TX ring 包成 DATA_M2C，或优先发送 READY、ACK、ERROR 等控制帧。
+4. `mc_activity_led_tick()` 根据 bridge UART RX+TX 字节计数更新活动 LED。
 
 固件启动时：
 
 - 初始化平台 UART/计时器。
 - 初始化 link session。
 - 默认压缩地图固件会初始化 PSRAM，并把生成的压缩 chunk 资产复制到 PSRAM。
+- 初始化 UART activity LED；该步骤在 PSRAM 初始化之后执行，避免破坏 GPIO0 上的 PSRAM 相关状态。
 - 调用 `reset_connection("boot")` 清空 Minecraft 逻辑会话。
 
 Bridge 发来 RESET 时，固件只重置 link/Minecraft 逻辑状态，不需要重新刷写固件。若需要从板卡硬件状态完全重来，使用 C2 reset 按键。
+
+## UART Activity LED
+
+默认固件启用 UART activity LED。配置宏在 [firmware/mc_firmware_config.h](../firmware/mc_firmware_config.h)：
+
+```c
+#define MC_UART_ACTIVITY_LED_ENABLE 1
+```
+
+[firmware/mc_activity_led.c](../firmware/mc_activity_led.c) 只接收字节计数和 `platform_ticks()`，不直接访问 UART 或 Minecraft 状态。`pump_link_rx()` 在 `platform_bridge_read()` 成功读到字节后记录 RX 字节数；`pump_link_tx()` 在 `platform_bridge_write()` 成功写出字节后记录 TX 字节数。RX 和 TX 共享同一个 100ms 采样窗口：
+
+| 每 100ms 字节数 | LED 行为 |
+| ---: | --- |
+| `0` | 熄灭 |
+| `1..64` | 约 1Hz 闪烁 |
+| `65..512` | 约 3Hz 闪烁 |
+| `>512` | 约 6Hz 闪烁 |
+
+LED 连接到板卡 `GPIO_0`，电路为 active-low：拉低点亮，拉高熄灭。[firmware/platform_activity_led.c](../firmware/platform_activity_led.c) 只设置 GPIO0 bit 0；[firmware/platform_gpio0.c](../firmware/platform_gpio0.c) 维护 GPIO0 shadow register，并用 masked write 保留其他位，尤其是 PSRAM 初始化设置的 bit 15。实现不读取 `REG_GPIO_0_DR`，也不会按每个 UART 字节写 GPIO；只有目标 LED 电平变化时才写 GPIO。
+
+当 `MC_UART_ACTIVITY_LED_ENABLE=0` 时，`mc_activity_led_*` 接口编译为 no-op，固件不会配置或写入 `GPIO_0`。
 
 ## Bridge
 
