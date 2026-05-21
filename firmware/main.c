@@ -1,4 +1,5 @@
 #include "platform_ecos.h"
+#include "mc_activity_led.h"
 #include "mc_config.h"
 #include "mc_firmware_config.h"
 #include "mc_link_session.h"
@@ -152,6 +153,7 @@ static void pump_link_rx(void)
     uint8_t buf[MC_TICK_BUDGET_RX_BYTES];
     size_t n = platform_bridge_read(buf, sizeof(buf));
     if (n > 0u) {
+        mc_activity_led_observe_bytes(n);
 #if MC_LOG_LINK_UART_IO
         MC_LOGD("link rx uart bytes=%u", (unsigned int)n);
 #endif
@@ -226,6 +228,7 @@ static void pump_link_tx(void)
         size_t written = platform_bridge_write(link_pending + link_pending_pos,
                                                to_write);
         if (written > 0u) {
+            mc_activity_led_observe_bytes(written);
 #if MC_LOG_LEVEL >= MC_LOG_DEBUG
             link_uart_tx_bytes += (uint32_t)written;
             if (should_log_count(link_uart_tx_bytes)) {
@@ -279,6 +282,7 @@ static void pump_link_tx(void)
         }
         written = platform_bridge_write(link_pending, to_write);
         if (written > 0u) {
+            mc_activity_led_observe_bytes(written);
 #if MC_LOG_LEVEL >= MC_LOG_DEBUG
             link_uart_tx_bytes += (uint32_t)written;
             if (should_log_count(link_uart_tx_bytes)) {
@@ -308,11 +312,13 @@ void main(void)
             (unsigned int)MC_BRIDGE_UART_ID,
             (unsigned int)MC_LOG_UART_ID);
     init_compressed_map_or_halt();
+    mc_activity_led_init(platform_ticks());
     reset_connection("boot");
 
     for (;;) {
         pump_link_rx();
         pump_server();
         pump_link_tx();
+        mc_activity_led_tick(platform_ticks());
     }
 }

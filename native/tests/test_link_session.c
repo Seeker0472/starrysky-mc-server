@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include "platform_gpio0.h"
+#include "mc_activity_led.h"
 #include "mc_link.h"
 #include "mc_link_session.h"
 #include "mc_ringbuf.h"
@@ -20,15 +22,25 @@ static size_t platform_bridge_write_limit = (size_t)-1;
 static size_t platform_bridge_write_last_len;
 static uint8_t platform_bridge_write_capture[MC_LINK_MAX_FRAME_LEN];
 static size_t platform_bridge_write_capture_len;
+static uint8_t platform_bridge_read_capture[MC_LINK_MAX_FRAME_LEN];
+static size_t platform_bridge_read_capture_len;
+static size_t platform_bridge_read_capture_pos;
 static uint32_t platform_tick_now;
 
 void platform_init(void) {}
 
 size_t platform_bridge_read(uint8_t *dst, size_t max_len)
 {
-    (void)dst;
-    (void)max_len;
-    return 0u;
+    size_t remaining = platform_bridge_read_capture_len - platform_bridge_read_capture_pos;
+    size_t n = remaining;
+    if (n > max_len) {
+        n = max_len;
+    }
+    if (n > 0u) {
+        memcpy(dst, platform_bridge_read_capture + platform_bridge_read_capture_pos, n);
+        platform_bridge_read_capture_pos += n;
+    }
+    return n;
 }
 
 size_t platform_bridge_write(const uint8_t *src, size_t max_len)
@@ -749,6 +761,24 @@ static void reset_main_tx_probe(void)
     mc_link_session_init(&link_session, &rx_ring);
 }
 
+static void reset_main_activity_led_probe(uint32_t now_ticks)
+{
+    platform_tick_now = now_ticks;
+    platform_gpio0_reset_shadow(0xffffffffu, PLATFORM_GPIO0_BIT_15);
+    mc_activity_led_init(now_ticks);
+    platform_bridge_read_capture_len = 0u;
+    platform_bridge_read_capture_pos = 0u;
+}
+
+static int queue_bridge_read_bytes(const uint8_t *bytes, size_t len)
+{
+    ASSERT_TRUE(len <= sizeof(platform_bridge_read_capture));
+    memcpy(platform_bridge_read_capture, bytes, len);
+    platform_bridge_read_capture_len = len;
+    platform_bridge_read_capture_pos = 0u;
+    return 1;
+}
+
 static int test_firmware_main_pump_link_tx_obeys_loop_budget(void)
 {
     uint8_t payload[MC_LINK_MAX_PAYLOAD];
@@ -819,6 +849,54 @@ static int test_firmware_main_queues_keepalive_while_m2c_busy(void)
     return 0;
 }
 
+static int test_firmware_main_rx_observation_drives_activity_led(void)
+{
+    uint8_t encoded[MC_LINK_MAX_FRAME_LEN];
+    size_t encoded_len = 0u;
+    const uint8_t payload[] = {0xf1u, 0x01u, 0x00u, 0x02u, 0x01u, 0x00u};
+
+    reset_connection_quiet();
+    reset_main_activity_led_probe(0u);
+    ASSERT_TRUE(mc_link_encode(MC_LINK_HELLO,
+                               0u,
+                               0u,
+                               payload,
+                               sizeof(payload),
+                               encoded,
+                               sizeof(encoded),
+                               &encoded_len));
+    ASSERT_TRUE(queue_bridge_read_bytes(encoded, encoded_len));
+
+    pump_link_rx();
+    platform_tick_now = MC_ACTIVITY_LED_SAMPLE_TICKS;
+    mc_activity_led_tick(platform_tick_now);
+
+    ASSERT_EQ(platform_gpio0_dr_shadow() & PLATFORM_GPIO0_BIT_0, 0u);
+    ASSERT_EQ(platform_gpio0_dr_shadow() & PLATFORM_GPIO0_BIT_15, PLATFORM_GPIO0_BIT_15);
+    return 0;
+}
+
+static int test_firmware_main_tx_observation_drives_activity_led(void)
+{
+    uint8_t payload[32];
+    for (size_t i = 0u; i < sizeof(payload); i++) {
+        payload[i] = (uint8_t)(i + 1u);
+    }
+
+    reset_connection_quiet();
+    reset_main_tx_probe();
+    reset_main_activity_led_probe(0u);
+    ASSERT_EQ(mc_ringbuf_write(&tx_ring, payload, sizeof(payload)), sizeof(payload));
+
+    pump_link_tx();
+    platform_tick_now = MC_ACTIVITY_LED_SAMPLE_TICKS;
+    mc_activity_led_tick(platform_tick_now);
+
+    ASSERT_EQ(platform_gpio0_dr_shadow() & PLATFORM_GPIO0_BIT_0, 0u);
+    ASSERT_EQ(platform_gpio0_dr_shadow() & PLATFORM_GPIO0_BIT_15, PLATFORM_GPIO0_BIT_15);
+    return 0;
+}
+
 static int test_tick_extender_resets_before_hardware_timer_stalls(void)
 {
     mc_tick_extender_t extender;
@@ -877,6 +955,8 @@ int test_firmware_main(void)
 
     if (test_firmware_main_pump_link_tx_obeys_loop_budget()) return 1;
     if (test_firmware_main_queues_keepalive_while_m2c_busy()) return 1;
+    if (test_firmware_main_rx_observation_drives_activity_led()) return 1;
+    if (test_firmware_main_tx_observation_drives_activity_led()) return 1;
     if (test_tick_extender_resets_before_hardware_timer_stalls()) return 1;
     return 0;
 }
