@@ -25,7 +25,8 @@
 ## Fixed Protocol Choices
 
 - Java protocol version: 47
-- Compression: disabled
+- Compression: enabled in the default `firmware-c2` profile; disabled only in
+  the legacy firmware profile
 - Encryption/authentication: disabled
 - Players: 1
 - World: generated superflat chunk data

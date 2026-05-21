@@ -100,6 +100,12 @@ The default `firmware-c2` package uses Minecraft protocol compression, offline
 precompressed spawn chunks, and PSRAM runtime chunk storage. Build
 `firmware-c2-legacy` only when you need the old SRAM map fallback.
 
+After the bootstrap chunks are queued, the firmware sends Play KeepAlive
+packets on a fixed interval. KeepAlive ids advance each interval; replies clear
+the pending marker for diagnostics, but the firmware does not disconnect the
+Minecraft session for missed replies. Reset the board when you need to force a
+fresh server session.
+
 MCU-to-PC firmware transmit is conservative by default. Build
 `firmware-c2-aggressive` to use the validated MCU-to-PC aggressive profile; it
 keeps the stable frame size, TX budget, UART burst, and 115200 baud, and lowers
@@ -111,6 +117,10 @@ then requires three formal probes per profile. A 3/3 profile is stable; a 2/3
 profile is treated as borderline and stops probing. Real DATA is written one
 byte at a time using one supported profile slower than the fastest stable or
 borderline result, and downshifts on retransmit timeouts.
+
+The bridge drops Minecraft 1.8 serverbound movement packets before forwarding
+PC-to-firmware DATA so idle movement spam cannot fill the UART link. KeepAlive
+responses and other serverbound packets are preserved.
 
 The default bridge UART baud remains 115200 for conservative bring-up and for
 the validated aggressive profile. If you build custom firmware with a different
@@ -155,5 +165,3 @@ nix build .#bridge-windows
 ```
 
 Start Minecraft Java Edition 1.8.x and add server `127.0.0.1:25565`.
-
-The first target is entering the world. Smooth gameplay is outside the first milestone.
