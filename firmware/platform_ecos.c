@@ -9,6 +9,8 @@
 #define UART1_RX_EMPTY 0x080u
 #define PLATFORM_LOG_ZERO_PROGRESS_LIMIT 1024u
 
+static mc_tick_extender_t platform_tick_extender;
+
 static void uart0_tx_pace(void)
 {
 #if MC_UART0_TX_PACE_LOOPS > 0
@@ -83,6 +85,7 @@ void platform_init(void)
     uart0_init();
     uart1_init();
     sys_tick_init();
+    mc_tick_extender_init(&platform_tick_extender);
 }
 
 size_t platform_bridge_read(uint8_t *dst, size_t max_len)
@@ -129,7 +132,14 @@ void platform_log_write(const char *src, size_t len)
 
 uint32_t platform_ticks(void)
 {
-    return get_sys_tick();
+    int reset_timer = 0;
+    uint32_t ticks = mc_tick_extender_update(&platform_tick_extender,
+                                             get_sys_tick(),
+                                             &reset_timer);
+    if (reset_timer) {
+        sys_tick_init();
+    }
+    return ticks;
 }
 
 size_t platform_uart_read(uint8_t *dst, size_t max_len)

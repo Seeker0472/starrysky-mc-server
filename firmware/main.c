@@ -25,6 +25,10 @@ static volatile uint32_t link_rx_error_count;
 static volatile uint32_t link_tx_backpressure_count;
 static volatile int32_t tx_backpressure_stage;
 static volatile int32_t tx_backpressure_chunk;
+#if MC_LOG_LEVEL >= MC_LOG_DEBUG
+static uint32_t link_m2c_queue_count;
+static uint32_t link_uart_tx_bytes;
+#endif
 
 static void server_trace(void *user, const mc_trace_event_t *event);
 
@@ -112,6 +116,17 @@ static void server_trace(void *user, const mc_trace_event_t *event)
         tx_backpressure_stage = event->value0;
         tx_backpressure_chunk = event->value1;
         break;
+    case MC_TRACE_KEEPALIVE_SEND:
+        MC_LOGD("keepalive send id=%d tx_len=%u",
+                (int)event->value0,
+                (unsigned int)event->text_len);
+        break;
+    case MC_TRACE_KEEPALIVE_ACK:
+        MC_LOGD("keepalive ack id=%d", (int)event->value0);
+        break;
+    case MC_TRACE_PLAY_UNHANDLED:
+        MC_LOGD("play unhandled packet id=%d len=%d", (int)event->value0, (int)event->value1);
+        break;
     default:
         break;
     }
@@ -182,7 +197,7 @@ static void pump_server(void)
             drop_stale_link_tx_data();
         }
     }
-    if (!mc_server_tick(&server, &tx_ring)) {
+    if (!mc_server_tick_at(&server, &tx_ring, platform_ticks())) {
         tx_backpressure_count++;
         if (should_log_count(tx_backpressure_count)) {
             MC_LOGI("tx backpressure count=%u stage=%d chunk=%d",
@@ -190,6 +205,12 @@ static void pump_server(void)
                     (int)tx_backpressure_stage,
                     (int)tx_backpressure_chunk);
         }
+    }
+    if (mc_server_take_tx_reset(&server)) {
+        MC_LOGD("link pending preserved len=%u pos=%u",
+                (unsigned int)link_pending_len,
+                (unsigned int)link_pending_pos);
+        drop_stale_link_tx_data();
     }
 }
 
@@ -205,6 +226,12 @@ static void pump_link_tx(void)
         size_t written = platform_bridge_write(link_pending + link_pending_pos,
                                                to_write);
         if (written > 0u) {
+#if MC_LOG_LEVEL >= MC_LOG_DEBUG
+            link_uart_tx_bytes += (uint32_t)written;
+            if (should_log_count(link_uart_tx_bytes)) {
+                MC_LOGD("link uart tx bytes=%u", (unsigned int)link_uart_tx_bytes);
+            }
+#endif
 #if MC_LOG_LINK_UART_IO
             MC_LOGD("link tx uart bytes=%u", (unsigned int)written);
 #endif
@@ -221,11 +248,26 @@ static void pump_link_tx(void)
         }
     }
 
-    if (!mc_link_session_queue_server_tx(&link_session, &tx_ring)) {
-        link_tx_backpressure_count++;
-        if (should_log_count(link_tx_backpressure_count)) {
-            MC_LOGI("link tx backpressure count=%u", (unsigned int)link_tx_backpressure_count);
+    {
+#if MC_LOG_LEVEL >= MC_LOG_DEBUG
+        uint32_t m2c_frames_before = link_session.data_m2c_frames;
+#endif
+        if (!mc_link_session_queue_server_tx(&link_session, &tx_ring)) {
+            link_tx_backpressure_count++;
+            if (should_log_count(link_tx_backpressure_count)) {
+                MC_LOGI("link tx backpressure count=%u", (unsigned int)link_tx_backpressure_count);
+            }
         }
+#if MC_LOG_LEVEL >= MC_LOG_DEBUG
+        if (link_session.data_m2c_frames != m2c_frames_before) {
+            link_m2c_queue_count++;
+            if (should_log_count(link_m2c_queue_count)) {
+                MC_LOGD("link m2c queued frames=%u tx_ring=%u",
+                        (unsigned int)link_session.data_m2c_frames,
+                        (unsigned int)mc_ringbuf_len(&tx_ring));
+            }
+        }
+#endif
     }
 
     link_pending_len = mc_link_session_read_tx(&link_session, link_pending, sizeof(link_pending));
@@ -237,6 +279,12 @@ static void pump_link_tx(void)
         }
         written = platform_bridge_write(link_pending, to_write);
         if (written > 0u) {
+#if MC_LOG_LEVEL >= MC_LOG_DEBUG
+            link_uart_tx_bytes += (uint32_t)written;
+            if (should_log_count(link_uart_tx_bytes)) {
+                MC_LOGD("link uart tx bytes=%u", (unsigned int)link_uart_tx_bytes);
+            }
+#endif
 #if MC_LOG_LINK_UART_IO
             MC_LOGD("link tx uart bytes=%u", (unsigned int)written);
 #endif

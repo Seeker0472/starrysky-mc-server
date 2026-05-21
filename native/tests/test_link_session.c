@@ -4,6 +4,8 @@
 #include "mc_link.h"
 #include "mc_link_session.h"
 #include "mc_ringbuf.h"
+#include "platform_ecos.h"
+#include "mc_world.h"
 
 #undef MC_LINK_TX_MAX_BYTES_PER_LOOP
 #define MC_LINK_TX_MAX_BYTES_PER_LOOP 64u
@@ -18,6 +20,7 @@ static size_t platform_bridge_write_limit = (size_t)-1;
 static size_t platform_bridge_write_last_len;
 static uint8_t platform_bridge_write_capture[MC_LINK_MAX_FRAME_LEN];
 static size_t platform_bridge_write_capture_len;
+static uint32_t platform_tick_now;
 
 void platform_init(void) {}
 
@@ -45,12 +48,35 @@ size_t platform_bridge_write(const uint8_t *src, size_t max_len)
 
 uint32_t platform_ticks(void)
 {
-    return 0u;
+    return platform_tick_now;
 }
 
 #define main firmware_main_entry
 #include "../../firmware/main.c"
 #undef main
+
+static int firmware_enter_play_and_bootstrap(uint32_t now_ticks)
+{
+    uint8_t out[MC_TX_RING_CAP];
+    const uint8_t handshake_login[] = {
+        0x0f, 0x00, 0x2f, 0x09, '1','2','7','.','0','.','0','.','1', 0x63, 0xdd, 0x02
+    };
+    const uint8_t login_start[] = {
+        0x09, 0x00, 0x07, 'p','l','a','y','e','r','1'
+    };
+
+    reset_connection_quiet();
+    ASSERT_TRUE(mc_server_receive(&server, handshake_login, sizeof(handshake_login), &tx_ring));
+    ASSERT_TRUE(mc_server_receive(&server, login_start, sizeof(login_start), &tx_ring));
+    (void)mc_ringbuf_read(&tx_ring, out, sizeof(out));
+
+    for (size_t i = 0u; i < mc_world_spawn_chunk_count() + 8u && !server.play_bootstrap_sent; i++) {
+        ASSERT_TRUE(mc_server_tick_at(&server, &tx_ring, now_ticks));
+        (void)mc_ringbuf_read(&tx_ring, out, sizeof(out));
+    }
+    ASSERT_TRUE(server.play_bootstrap_sent);
+    return 1;
+}
 
 static int read_frame_from_tx_chunked(mc_link_session_t *session, mc_link_frame_t *frame, size_t chunk_len)
 {
@@ -774,12 +800,52 @@ static int test_firmware_main_pump_link_tx_obeys_loop_budget(void)
     return 0;
 }
 
+static int test_firmware_main_queues_keepalive_while_m2c_busy(void)
+{
+    uint8_t out[128];
+    uint8_t busy = 0xaa;
+    uint32_t now = 1u;
+
+    reset_main_tx_probe();
+    ASSERT_TRUE(firmware_enter_play_and_bootstrap(now));
+    ASSERT_EQ(mc_ringbuf_write(&link_session.tx, &busy, 1u), 1u);
+    server.last_keepalive_tick = now;
+    platform_tick_now = now + MC_KEEPALIVE_INTERVAL_TICKS;
+
+    pump_server();
+    ASSERT_EQ(server.keepalive_pending, 1u);
+    ASSERT_TRUE(mc_ringbuf_read(&tx_ring, out, sizeof(out)) > 0u);
+    ASSERT_TRUE(server.last_keepalive_tick != 0u);
+    return 0;
+}
+
+static int test_tick_extender_resets_before_hardware_timer_stalls(void)
+{
+    mc_tick_extender_t extender;
+    uint32_t edge = (uint32_t)MC_PLATFORM_TICK_RESET_THRESHOLD;
+    int reset_timer = -1;
+
+    mc_tick_extender_init(&extender);
+
+    ASSERT_EQ(mc_tick_extender_update(&extender, edge - 1u, &reset_timer), edge - 1u);
+    ASSERT_EQ(reset_timer, 0);
+
+    ASSERT_EQ(mc_tick_extender_update(&extender, edge, &reset_timer), edge);
+    ASSERT_EQ(reset_timer, 1);
+
+    ASSERT_EQ(mc_tick_extender_update(&extender, 250u, &reset_timer), edge + 250u);
+    ASSERT_EQ(reset_timer, 0);
+
+    return 0;
+}
+
 int test_firmware_main(void)
 {
     mc_link_frame_t frame;
     const uint8_t invalid_varint_prefix[] = {0x80u, 0x80u, 0x80u, 0x80u, 0x80u, 0x00u};
 
     mc_link_session_init(&link_session, &rx_ring);
+    platform_tick_now = 0u;
     reset_connection_quiet();
 
     ASSERT_TRUE(feed_main_data_c2m(0, invalid_varint_prefix, sizeof(invalid_varint_prefix)));
@@ -810,6 +876,8 @@ int test_firmware_main(void)
     ASSERT_TRUE(!read_main_link_frame(&frame));
 
     if (test_firmware_main_pump_link_tx_obeys_loop_budget()) return 1;
+    if (test_firmware_main_queues_keepalive_while_m2c_busy()) return 1;
+    if (test_tick_extender_resets_before_hardware_timer_stalls()) return 1;
     return 0;
 }
 
