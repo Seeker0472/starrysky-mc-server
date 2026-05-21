@@ -76,6 +76,10 @@
 #define MC_LOG_LINK_UART_IO 0
 #endif
 
+#ifndef MC_UART_ACTIVITY_LED_ENABLE
+#define MC_UART_ACTIVITY_LED_ENABLE 1
+#endif
+
 #ifndef MC_PSRAM_ENABLE
 #define MC_PSRAM_ENABLE 0
 #endif
@@ -122,6 +126,10 @@
 
 #if MC_LOG_LINK_UART_IO != 0 && MC_LOG_LINK_UART_IO != 1
 #error "MC_LOG_LINK_UART_IO must be 0 or 1"
+#endif
+
+#if MC_UART_ACTIVITY_LED_ENABLE != 0 && MC_UART_ACTIVITY_LED_ENABLE != 1
+#error "MC_UART_ACTIVITY_LED_ENABLE must be 0 or 1"
 #endif
 
 #if MC_PSRAM_ENABLE != 0 && MC_PSRAM_ENABLE != 1

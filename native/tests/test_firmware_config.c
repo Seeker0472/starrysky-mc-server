@@ -30,5 +30,6 @@ int test_firmware_config(void)
     ASSERT_TRUE(MC_BRIDGE_UART_BAUD >= 115200u);
     ASSERT_EQ(MC_TRACE_LINK_UART_RX_DATA, 0);
     ASSERT_EQ(MC_LOG_LINK_UART_IO, 0);
+    ASSERT_EQ(MC_UART_ACTIVITY_LED_ENABLE, 1);
     return 0;
 }

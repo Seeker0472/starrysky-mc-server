@@ -52,6 +52,10 @@
 #define MC_EXPECT_USE_PSRAM_COMPRESSED_MAP MC_USE_PSRAM_COMPRESSED_MAP
 #endif
 
+#ifndef MC_EXPECT_UART_ACTIVITY_LED_ENABLE
+#define MC_EXPECT_UART_ACTIVITY_LED_ENABLE MC_UART_ACTIVITY_LED_ENABLE
+#endif
+
 #if MC_BRIDGE_UART_ID != MC_EXPECT_BRIDGE_UART_ID
 #error "unexpected bridge uart mapping"
 #endif
@@ -102,6 +106,10 @@
 
 #if MC_USE_PSRAM_COMPRESSED_MAP != MC_EXPECT_USE_PSRAM_COMPRESSED_MAP
 #error "unexpected PSRAM compressed map setting"
+#endif
+
+#if MC_UART_ACTIVITY_LED_ENABLE != MC_EXPECT_UART_ACTIVITY_LED_ENABLE
+#error "unexpected UART activity LED enable"
 #endif
 
 int firmware_config_compile_probe = 0;

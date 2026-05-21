@@ -290,6 +290,20 @@ EOF
     fi
 
     if cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
+      -DMC_UART_ACTIVITY_LED_ENABLE=2 \
+      -c native/tests/test_firmware_config_compile.c \
+      -o build/native/firmware_config_invalid_uart_activity_led.o; then
+      echo "invalid UART activity LED enable unexpectedly compiled" >&2
+      exit 1
+    fi
+
+    cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
+      -DMC_UART_ACTIVITY_LED_ENABLE=0 \
+      -DMC_EXPECT_UART_ACTIVITY_LED_ENABLE=0 \
+      -c native/tests/test_firmware_config_compile.c \
+      -o build/native/firmware_config_uart_activity_led_disabled.o
+
+    if cc -std=c11 -Wall -Wextra -Werror -Icore/include -Ifirmware \
       -DMC_PSRAM_FLOW_TEST_BYTES=0 \
       -c native/tests/test_firmware_config_compile.c \
       -o build/native/firmware_config_zero_psram_flow_bytes.o; then
