@@ -72,6 +72,20 @@ make firmware-log-debug
 
 本项目不包含自动刷写流程。刷写时使用现有 C2 板卡工具，把 `result/mc_uart_fw.bin` 写入板卡。
 
+### 地图资产
+
+默认 `firmware-c2` 会在编译阶段读取 `maps/showcase.png` 并生成压缩 spawn chunks。这个 PNG 是源资产，可以提交；`core/generated/` 是生成输出，不要提交。
+
+`maps/showcase.png` 必须是 48x48、8-bit RGB/RGBA、非隔行 PNG。每个不透明像素按严格调色板映射到 `y=4` 顶层方块；如果 PNG 不存在，生成器使用原来的 superflat fallback。需要扩展颜色时，可添加 `maps/showcase.palette.json`，格式见 [压缩地图与 PSRAM 固件](compressed-map-psram.md#自定义地图)。
+
+修改地图后建议至少运行：
+
+```bash
+python3 scripts/generate_compressed_chunks.py --out-dir /tmp/mc-world-assets --check
+nix build .#native-tests
+nix build .#firmware-c2
+```
+
 ## Bridge 构建
 
 Linux bridge：

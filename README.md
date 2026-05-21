@@ -37,7 +37,7 @@ Firmware logs
 - 默认 log UART：UART1/HP_UART，115200 baud。
 - Minecraft：Java Edition 1.8.x，protocol 47。
 - 服务端模式：offline，无加密，单人。
-- 默认地图：3x3 spawn chunks，superflat 风格，离线 zlib 压缩后在启动时复制到 PSRAM。
+- 默认地图：`maps/showcase.png` 编译成 3x3 spawn chunks，离线 zlib 压缩后在启动时复制到 PSRAM；未提供 PNG 时回退到 superflat 风格。
 
 ## 快速构建
 
@@ -78,6 +78,21 @@ make firmware
 - `memory-report.txt`：FLASH、SRAM、PSRAM 占用报告。
 
 构建与运行细节见 [docs/build-and-run.md](docs/build-and-run.md)。
+
+## 自定义地图资产
+
+默认压缩地图由 [maps/showcase.png](maps/showcase.png) 提供。构建会在编译阶段读取这个 48x48、8-bit RGB/RGBA、非隔行 PNG，把每个像素映射为 3x3 spawn chunk footprint 中 `y=4` 的顶层方块；底层仍保持 bedrock/dirt/air 结构。这个 PNG 是源资产，可以提交到 git；`core/generated/` 仍是构建输出，不要提交。
+
+生成器使用严格调色板匹配。内置调色板覆盖 grass、stone、dirt、sand、white/red/cyan/blue/black wool；如需扩展颜色，可添加 `maps/showcase.palette.json`：
+
+```json
+{
+  "#00ff00": { "id": 2, "meta": 0 },
+  "#ff0000": { "id": 35, "meta": 14 }
+}
+```
+
+调色板 key 是 `#rrggbb`，`id` 范围为 `0..4095`，`meta` 范围为 `0..15`。透明像素、未知颜色、非 48x48 尺寸或不支持的 PNG 特性会让构建失败。
 
 ## 运行 Bridge
 
