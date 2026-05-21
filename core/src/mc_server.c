@@ -1,4 +1,5 @@
 #include "mc_server.h"
+#include "mc_commands.h"
 #include "mc_config.h"
 #include "mc_packet.h"
 #include "mc_varint.h"
@@ -20,6 +21,7 @@ enum {
     MC_BOOTSTRAP_SPAWN_POSITION,
     MC_BOOTSTRAP_TIME,
     MC_BOOTSTRAP_HEALTH,
+    MC_BOOTSTRAP_ABILITIES,
     MC_BOOTSTRAP_POSITION,
     MC_BOOTSTRAP_CHUNKS,
     MC_BOOTSTRAP_DONE
@@ -28,6 +30,15 @@ enum {
 enum {
     MC_MAX_SERVERBOUND_PACKET_ID = 0x7f
 };
+
+enum {
+    MC_WEATHER_PACKET_COUNT = 3
+};
+
+typedef struct {
+    const uint8_t *body;
+    size_t body_len;
+} queued_packet_t;
 
 #if MC_PROTOCOL_COMPRESSION_ENABLE && !MC_USE_PSRAM_COMPRESSED_MAP
 static const int32_t server_spawn_chunks[][2] = {
@@ -62,6 +73,35 @@ static int read_string_body(const uint8_t *body, size_t body_len, size_t *pos, c
         return 0;
     }
     if ((size_t)len >= dst_cap || *pos + (size_t)len > body_len) {
+        return 0;
+    }
+    memcpy(dst, body + *pos, (size_t)len);
+    dst[len] = '\0';
+    *pos += (size_t)len;
+    return 1;
+}
+
+static int bytes_have_c0_control(const uint8_t *bytes, size_t len)
+{
+    for (size_t i = 0u; i < len; i++) {
+        if (bytes[i] < 0x20u) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int read_chat_body(const uint8_t *body, size_t body_len, size_t *pos, char *dst, size_t dst_cap)
+{
+    int32_t len = 0;
+
+    if (!read_varint_body(body, body_len, pos, &len) || len < 0) {
+        return 0;
+    }
+    if ((size_t)len >= dst_cap || *pos + (size_t)len > body_len) {
+        return 0;
+    }
+    if (bytes_have_c0_control(body + *pos, (size_t)len)) {
         return 0;
     }
     memcpy(dst, body + *pos, (size_t)len);
@@ -182,6 +222,49 @@ static int queue_packet_auto(const mc_server_t *server, mc_ringbuf_t *tx, const 
     return mc_server_queue_packet(tx, body, body_len);
 }
 
+static size_t packet_auto_frame_len(const mc_server_t *server, size_t body_len)
+{
+#if MC_PROTOCOL_COMPRESSION_ENABLE
+    if (server->compression_enabled) {
+        return mc_packet_compressed_plain_frame_len(body_len);
+    }
+#else
+    (void)server;
+#endif
+    return mc_packet_frame_len(body_len);
+}
+
+static int add_packet_auto_frame_len(const mc_server_t *server, size_t body_len, size_t *needed)
+{
+    size_t frame_len = packet_auto_frame_len(server, body_len);
+
+    if (frame_len == 0u || frame_len > (size_t)-1 - *needed) {
+        return 0;
+    }
+    *needed += frame_len;
+    return 1;
+}
+
+typedef struct {
+    size_t head;
+    size_t tail;
+    size_t len;
+} tx_checkpoint_t;
+
+static void tx_checkpoint_save(const mc_ringbuf_t *tx, tx_checkpoint_t *checkpoint)
+{
+    checkpoint->head = tx->head;
+    checkpoint->tail = tx->tail;
+    checkpoint->len = tx->len;
+}
+
+static void tx_checkpoint_restore(mc_ringbuf_t *tx, const tx_checkpoint_t *checkpoint)
+{
+    tx->head = checkpoint->head;
+    tx->tail = checkpoint->tail;
+    tx->len = checkpoint->len;
+}
+
 static int queue_status_response(mc_ringbuf_t *tx)
 {
     static const char json[] =
@@ -269,15 +352,32 @@ static int queue_spawn_position(const mc_server_t *server, mc_ringbuf_t *tx)
            queue_packet_auto(server, tx, body, w.len);
 }
 
-static int queue_time(const mc_server_t *server, mc_ringbuf_t *tx)
+static int build_time_body(uint8_t *body, size_t body_cap, int32_t time_of_day, size_t *body_len)
+{
+    mc_writer_t w;
+
+    mc_writer_init(&w, body, body_cap);
+    if (!mc_write_varint(&w, 0x03) ||
+        !mc_write_i64(&w, 0) ||
+        !mc_write_i64(&w, time_of_day)) {
+        return 0;
+    }
+    *body_len = w.len;
+    return 1;
+}
+
+static int queue_time_value(const mc_server_t *server, mc_ringbuf_t *tx, int32_t time_of_day)
 {
     uint8_t body[32];
-    mc_writer_t w;
-    mc_writer_init(&w, body, sizeof(body));
-    return mc_write_varint(&w, 0x03) &&
-           mc_write_i64(&w, 0) &&
-           mc_write_i64(&w, 6000) &&
-           queue_packet_auto(server, tx, body, w.len);
+    size_t body_len = 0;
+
+    return build_time_body(body, sizeof(body), time_of_day, &body_len) &&
+           queue_packet_auto(server, tx, body, body_len);
+}
+
+static int queue_time(const mc_server_t *server, mc_ringbuf_t *tx)
+{
+    return queue_time_value(server, tx, server->world_time);
 }
 
 static int queue_health(const mc_server_t *server, mc_ringbuf_t *tx)
@@ -292,19 +392,139 @@ static int queue_health(const mc_server_t *server, mc_ringbuf_t *tx)
            queue_packet_auto(server, tx, body, w.len);
 }
 
-static int queue_position(const mc_server_t *server, mc_ringbuf_t *tx)
+static int queue_abilities(const mc_server_t *server, mc_ringbuf_t *tx)
 {
-    uint8_t body[64];
+    uint8_t body[32];
     mc_writer_t w;
     mc_writer_init(&w, body, sizeof(body));
-    return mc_write_varint(&w, 0x08) &&
-           mc_write_f64(&w, 0.5) &&
-           mc_write_f64(&w, 6.0) &&
-           mc_write_f64(&w, 0.5) &&
-           mc_write_f32(&w, 0.0f) &&
-           mc_write_f32(&w, 0.0f) &&
-           mc_write_i8(&w, 0) &&
+    return mc_write_varint(&w, 0x39) &&
+           mc_write_u8(&w, 0x0fu) &&
+           mc_write_f32(&w, 0.05f) &&
+           mc_write_f32(&w, 0.10f) &&
            queue_packet_auto(server, tx, body, w.len);
+}
+
+static int build_position_body(uint8_t *body,
+                               size_t body_cap,
+                               double x,
+                               double y,
+                               double z,
+                               float yaw,
+                               float pitch,
+                               size_t *body_len)
+{
+    mc_writer_t w;
+
+    mc_writer_init(&w, body, body_cap);
+    if (!mc_write_varint(&w, 0x08) ||
+        !mc_write_f64(&w, x) ||
+        !mc_write_f64(&w, y) ||
+        !mc_write_f64(&w, z) ||
+        !mc_write_f32(&w, yaw) ||
+        !mc_write_f32(&w, pitch) ||
+        !mc_write_i8(&w, 0)) {
+        return 0;
+    }
+    *body_len = w.len;
+    return 1;
+}
+
+static int queue_position_at(const mc_server_t *server,
+                             mc_ringbuf_t *tx,
+                             double x,
+                             double y,
+                             double z,
+                             float yaw,
+                             float pitch)
+{
+    uint8_t body[64];
+    size_t body_len = 0;
+
+    return build_position_body(body, sizeof(body), x, y, z, yaw, pitch, &body_len) &&
+           queue_packet_auto(server, tx, body, body_len);
+}
+
+static int queue_position(const mc_server_t *server, mc_ringbuf_t *tx)
+{
+    return queue_position_at(server,
+                             tx,
+                             server->player_x,
+                             server->player_y,
+                             server->player_z,
+                             server->player_yaw,
+                             server->player_pitch);
+}
+
+static int build_game_state_body(uint8_t *body,
+                                 size_t body_cap,
+                                 uint8_t reason,
+                                 float value,
+                                 size_t *body_len)
+{
+    mc_writer_t w;
+
+    mc_writer_init(&w, body, body_cap);
+    if (!mc_write_varint(&w, 0x2b) ||
+        !mc_write_u8(&w, reason) ||
+        !mc_write_f32(&w, value)) {
+        return 0;
+    }
+    *body_len = w.len;
+    return 1;
+}
+
+static int weather_game_state_values(mc_weather_t weather, uint8_t *reasons, float *values)
+{
+    switch (weather) {
+    case MC_WEATHER_CLEAR:
+        reasons[0] = 1u;
+        values[0] = 0.0f;
+        reasons[1] = 7u;
+        values[1] = 0.0f;
+        reasons[2] = 8u;
+        values[2] = 0.0f;
+        return 1;
+    case MC_WEATHER_RAIN:
+        reasons[0] = 2u;
+        values[0] = 0.0f;
+        reasons[1] = 7u;
+        values[1] = 1.0f;
+        reasons[2] = 8u;
+        values[2] = 0.0f;
+        return 1;
+    case MC_WEATHER_THUNDER:
+        reasons[0] = 2u;
+        values[0] = 0.0f;
+        reasons[1] = 7u;
+        values[1] = 1.0f;
+        reasons[2] = 8u;
+        values[2] = 1.0f;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int build_weather_bodies(uint8_t bodies[MC_WEATHER_PACKET_COUNT][16],
+                                size_t body_lens[MC_WEATHER_PACKET_COUNT],
+                                mc_weather_t weather)
+{
+    uint8_t reasons[MC_WEATHER_PACKET_COUNT];
+    float values[MC_WEATHER_PACKET_COUNT];
+
+    if (!weather_game_state_values(weather, reasons, values)) {
+        return 0;
+    }
+    for (size_t i = 0u; i < MC_WEATHER_PACKET_COUNT; i++) {
+        if (!build_game_state_body(bodies[i],
+                                   16u,
+                                   reasons[i],
+                                   values[i],
+                                   &body_lens[i])) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int queue_keepalive(const mc_server_t *server, mc_ringbuf_t *tx, int32_t keepalive_id)
@@ -317,17 +537,241 @@ static int queue_keepalive(const mc_server_t *server, mc_ringbuf_t *tx, int32_t 
            queue_packet_auto(server, tx, body, w.len);
 }
 
+static int json_append_char(char *dst, size_t dst_cap, size_t *pos, char ch)
+{
+    if (*pos + 1u >= dst_cap) {
+        return 0;
+    }
+    dst[*pos] = ch;
+    (*pos)++;
+    dst[*pos] = '\0';
+    return 1;
+}
+
+static int json_append_cstr(char *dst, size_t dst_cap, size_t *pos, const char *text)
+{
+    size_t i = 0u;
+
+    while (text[i] != '\0') {
+        if (!json_append_char(dst, dst_cap, pos, text[i])) {
+            return 0;
+        }
+        i++;
+    }
+    return 1;
+}
+
+static char hex_digit(uint8_t value)
+{
+    value &= 0x0fu;
+    return value < 10u ? (char)('0' + value) : (char)('A' + (value - 10u));
+}
+
+static int json_escape_text(const char *text, char *dst, size_t dst_cap)
+{
+    size_t pos = 0u;
+    size_t i = 0u;
+
+    if (dst_cap == 0u) {
+        return 0;
+    }
+    dst[0] = '\0';
+    while (text[i] != '\0') {
+        uint8_t ch = (uint8_t)text[i];
+
+        if (ch < 0x20u) {
+            if (!json_append_char(dst, dst_cap, &pos, '\\')) {
+                return 0;
+            }
+            if (!json_append_char(dst, dst_cap, &pos, 'u') ||
+                !json_append_char(dst, dst_cap, &pos, '0') ||
+                !json_append_char(dst, dst_cap, &pos, '0') ||
+                !json_append_char(dst, dst_cap, &pos, hex_digit((uint8_t)(ch >> 4))) ||
+                !json_append_char(dst, dst_cap, &pos, hex_digit(ch))) {
+                return 0;
+            }
+            i++;
+            continue;
+        }
+        if (ch == '"' || ch == '\\') {
+            if (!json_append_char(dst, dst_cap, &pos, '\\')) {
+                return 0;
+            }
+        }
+        if (!json_append_char(dst, dst_cap, &pos, (char)ch)) {
+            return 0;
+        }
+        i++;
+    }
+    return 1;
+}
+
+static int build_chat_json(const char *escaped, char *dst, size_t dst_cap)
+{
+    size_t pos = 0u;
+
+    if (dst_cap == 0u) {
+        return 0;
+    }
+    dst[0] = '\0';
+    return json_append_cstr(dst, dst_cap, &pos, "{\"text\":\"") &&
+           json_append_cstr(dst, dst_cap, &pos, escaped) &&
+           json_append_cstr(dst, dst_cap, &pos, "\"}");
+}
+
+static int build_chat_body(uint8_t *body, size_t body_cap, const char *text, size_t *body_len)
+{
+    char escaped[MC_COMMAND_TEXT_CAP * 6u];
+    char json[(MC_COMMAND_TEXT_CAP * 6u) + 16u];
+    mc_writer_t w;
+
+    if (!json_escape_text(text, escaped, sizeof(escaped)) ||
+        !build_chat_json(escaped, json, sizeof(json))) {
+        return 0;
+    }
+
+    mc_writer_init(&w, body, body_cap);
+    if (!mc_write_varint(&w, 0x02) ||
+        !mc_write_string(&w, json) ||
+        !mc_write_u8(&w, 0u)) {
+        return 0;
+    }
+    *body_len = w.len;
+    return 1;
+}
+
+static int queue_packet_batch(const mc_server_t *server,
+                              mc_ringbuf_t *tx,
+                              const queued_packet_t *packets,
+                              size_t packet_count)
+{
+    size_t needed = 0u;
+    tx_checkpoint_t checkpoint;
+
+    for (size_t i = 0u; i < packet_count; i++) {
+        if (!add_packet_auto_frame_len(server, packets[i].body_len, &needed)) {
+            return 0;
+        }
+    }
+    if (mc_ringbuf_free(tx) < needed) {
+        return 0;
+    }
+
+    tx_checkpoint_save(tx, &checkpoint);
+    for (size_t i = 0u; i < packet_count; i++) {
+        if (!queue_packet_auto(server, tx, packets[i].body, packets[i].body_len)) {
+            tx_checkpoint_restore(tx, &checkpoint);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void reset_play_runtime_state(mc_server_t *server)
 {
     server->last_keepalive_tick = 0u;
     server->keepalive_id = 0;
     server->keepalive_pending = 0u;
-    server->player_x = 0.5;
-    server->player_y = 6.0;
-    server->player_z = 0.5;
-    server->player_yaw = 0.0f;
-    server->player_pitch = 0.0f;
+    server->player_x = MC_COMMAND_DEFAULT_X;
+    server->player_y = MC_COMMAND_DEFAULT_Y;
+    server->player_z = MC_COMMAND_DEFAULT_Z;
+    server->player_yaw = MC_COMMAND_DEFAULT_YAW;
+    server->player_pitch = MC_COMMAND_DEFAULT_PITCH;
     server->player_on_ground = 0u;
+    server->world_time = MC_COMMAND_DEFAULT_TIME;
+    server->weather = MC_WEATHER_CLEAR;
+}
+
+static void build_command_context(const mc_server_t *server, mc_command_context_t *ctx)
+{
+    ctx->position.x = server->player_x;
+    ctx->position.y = server->player_y;
+    ctx->position.z = server->player_z;
+    ctx->position.yaw = server->player_yaw;
+    ctx->position.pitch = server->player_pitch;
+    ctx->time_of_day = server->world_time;
+    ctx->weather = server->weather;
+}
+
+static int execute_command_result(mc_server_t *server,
+                                  mc_ringbuf_t *tx,
+                                  const mc_command_result_t *result)
+{
+    uint8_t action_body[64];
+    uint8_t chat_body[(MC_COMMAND_TEXT_CAP * 6u) + 32u];
+    uint8_t weather_bodies[MC_WEATHER_PACKET_COUNT][16];
+    queued_packet_t packets[MC_WEATHER_PACKET_COUNT + 1u];
+    size_t weather_body_lens[MC_WEATHER_PACKET_COUNT];
+    size_t chat_body_len = 0u;
+    size_t body_len = 0u;
+
+    if (!build_chat_body(chat_body, sizeof(chat_body), result->chat, &chat_body_len)) {
+        return 0;
+    }
+    packets[0].body = chat_body;
+    packets[0].body_len = chat_body_len;
+
+    switch (result->type) {
+    case MC_COMMAND_RESULT_CHAT:
+        return queue_packet_batch(server, tx, packets, 1u);
+    case MC_COMMAND_RESULT_TELEPORT:
+        if (!build_position_body(action_body,
+                                 sizeof(action_body),
+                                 result->action.teleport.x,
+                                 result->action.teleport.y,
+                                 result->action.teleport.z,
+                                 result->action.teleport.yaw,
+                                 result->action.teleport.pitch,
+                                 &body_len)) {
+            return 0;
+        }
+        packets[0].body = action_body;
+        packets[0].body_len = body_len;
+        packets[1].body = chat_body;
+        packets[1].body_len = chat_body_len;
+        if (!queue_packet_batch(server, tx, packets, 2u)) {
+            return 0;
+        }
+        server->player_x = result->action.teleport.x;
+        server->player_y = result->action.teleport.y;
+        server->player_z = result->action.teleport.z;
+        server->player_yaw = result->action.teleport.yaw;
+        server->player_pitch = result->action.teleport.pitch;
+        return 1;
+    case MC_COMMAND_RESULT_TIME:
+        if (!build_time_body(action_body,
+                             sizeof(action_body),
+                             result->action.time_of_day,
+                             &body_len)) {
+            return 0;
+        }
+        packets[0].body = action_body;
+        packets[0].body_len = body_len;
+        packets[1].body = chat_body;
+        packets[1].body_len = chat_body_len;
+        if (!queue_packet_batch(server, tx, packets, 2u)) {
+            return 0;
+        }
+        server->world_time = result->action.time_of_day;
+        return 1;
+    case MC_COMMAND_RESULT_WEATHER:
+        if (!build_weather_bodies(weather_bodies, weather_body_lens, result->action.weather)) {
+            return 0;
+        }
+        for (size_t i = 0u; i < MC_WEATHER_PACKET_COUNT; i++) {
+            packets[i].body = weather_bodies[i];
+            packets[i].body_len = weather_body_lens[i];
+        }
+        packets[MC_WEATHER_PACKET_COUNT].body = chat_body;
+        packets[MC_WEATHER_PACKET_COUNT].body_len = chat_body_len;
+        if (!queue_packet_batch(server, tx, packets, MC_WEATHER_PACKET_COUNT + 1u)) {
+            return 0;
+        }
+        server->weather = result->action.weather;
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 #if MC_PROTOCOL_COMPRESSION_ENABLE && !MC_USE_PSRAM_COMPRESSED_MAP
@@ -634,6 +1078,22 @@ static int handle_packet(mc_server_t *server, const mc_packet_t *packet, mc_ring
         return 1;
     }
 
+    if (server->state == MC_CONN_PLAY && packet_id == 0x01) {
+        char message[MC_COMMAND_TEXT_CAP];
+        mc_command_context_t ctx;
+        mc_command_result_t result;
+
+        if (!read_chat_body(packet->body, packet->body_len, &pos, message, sizeof(message)) ||
+            pos != packet->body_len) {
+            return 0;
+        }
+        build_command_context(server, &ctx);
+        if (!mc_commands_handle_chat(server->username, message, &ctx, &result)) {
+            return 0;
+        }
+        return execute_command_result(server, tx, &result);
+    }
+
     if (server->state == MC_CONN_PLAY &&
         (packet_id == 0x03 || packet_id == 0x04 || packet_id == 0x05 || packet_id == 0x06)) {
         if (!handle_play_movement(server, packet_id, packet->body, packet->body_len, pos)) {
@@ -812,6 +1272,9 @@ int mc_server_tick_at(mc_server_t *server, mc_ringbuf_t *tx, uint32_t now_ticks)
                 break;
             case MC_BOOTSTRAP_HEALTH:
                 queued = queue_health(server, tx);
+                break;
+            case MC_BOOTSTRAP_ABILITIES:
+                queued = queue_abilities(server, tx);
                 break;
             case MC_BOOTSTRAP_POSITION:
                 queued = queue_position(server, tx);

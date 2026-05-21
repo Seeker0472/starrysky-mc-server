@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "mc_config.h"
 #include "mc_ringbuf.h"
+#include "mc_commands.h"
 
 typedef enum {
     MC_CONN_HANDSHAKE = 0,
@@ -64,6 +65,8 @@ typedef struct {
     float player_yaw;
     float player_pitch;
     uint8_t player_on_ground;
+    int32_t world_time;
+    mc_weather_t weather;
     int play_bootstrap_sent;
     uint8_t rx_accum[MC_MAX_PACKET_BODY + 8u];
     size_t rx_accum_len;
