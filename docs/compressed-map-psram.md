@@ -1,114 +1,94 @@
-# C2 Compressed Map PSRAM Firmware
+# 压缩地图与 PSRAM 固件
 
-The default `firmware-c2` package is the C2 firmware profile for Minecraft
-protocol compression with offline precompressed spawn chunks. The build runs
-`scripts/generate_compressed_chunks.py`, links the generated compressed chunk
-assets into the default firmware, copies those assets into PSRAM at boot, and
-then sends chunk data through Minecraft compressed packet frames after login
-enables protocol compression.
+默认 `firmware-c2` 是当前发布固件：启用 Minecraft 协议压缩，构建时生成 3x3 spawn chunks 的 zlib 压缩资产，启动时复制到 C2 外部 PSRAM，然后在 Play bootstrap 阶段直接发送 Minecraft compressed packet frame。
 
-The `firmware-c2-legacy` package keeps the old SRAM map behavior. It does not
-link generated compressed map assets and does not use the PSRAM compressed-map
-runtime path.
+旧的 `firmware-c2-legacy` 仍保留 SRAM 地图 fallback。当前 legacy profile 不启用协议压缩，不链接生成的压缩地图资产，也不走 PSRAM runtime path。
 
-## Build
+## 构建流程
 
-Build the default compressed map PSRAM firmware:
+`nix build .#firmware-c2` 会执行：
+
+1. 运行 [scripts/generate_compressed_chunks.py](../scripts/generate_compressed_chunks.py)。
+2. 在 `core/generated/` 生成 `mc_world_compressed_assets.h` 和 `mc_world_compressed_assets.c`。
+3. 从生成的 C 文件提取 `mc_world_compressed_total_bytes`，作为 PSRAM runtime arena 占用写入固件内存报告。
+4. 交叉编译 C2 固件。
+5. 安装 `mc_uart_fw.bin`、ELF、HEX、反汇编和 `memory-report.txt`。
+
+构建命令：
 
 ```bash
 nix build .#firmware-c2
 ```
 
-The firmware binary to flash is:
+产物：
 
 ```text
 result/mc_uart_fw.bin
+result/memory-report.txt
 ```
 
-`make firmware` is the equivalent Make target.
+## 运行时行为
 
-The maintained firmware outputs are:
+固件启动后：
 
-```text
-firmware-c2            default compressed-map PSRAM firmware
-firmware-c2-legacy     old SRAM map fallback
-firmware-c2-aggressive default firmware with MCU-to-PC aggressive TX enabled
-log-debug              default firmware with MC_LOG_DEBUG
-```
+1. `platform_psram_init()` 配置 QSPI/PSRAM 控制器。
+2. `mc_world_compressed_init(platform_psram_base(), platform_psram_size())` 校验生成资产并复制压缩 payload。
+3. 日志输出 `compressed map psram ready chunks=9`。
+4. Login 阶段启用 Minecraft 协议压缩。
+5. Play bootstrap 阶段逐个调用 `mc_world_queue_compressed_spawn_chunk()` 排队发送 9 个 compressed chunk frame。
 
-## Flash And Run
-
-Automatic flashing is not part of this project. Build the firmware, then flash
-`result/mc_uart_fw.bin` using the existing board flashing workflow for the C2.
-
-After flashing, connect the bridge UART to the host and run the bridge with a
-baud rate matching the firmware UART configuration. The ready-made C2 profiles
-use UART0/SYS_UART/type-c at 115200 baud for bridge traffic and UART1/HP_UART
-at 115200 baud for firmware logs.
-
-Windows example:
-
-```powershell
-mc-uart-bridge.exe --serial COM5 --baud 115200 --listen 127.0.0.1:25565
-```
-
-Linux example:
-
-```bash
-mc-uart-bridge --serial /dev/ttyUSB0 --baud 115200 --listen 127.0.0.1:25565
-```
-
-Do not enable `--verbose` during throughput measurements unless the log output
-is the measurement target. Verbose bridge logging adds substantial host-side
-I/O and can noticeably reduce measured throughput.
-
-Start Minecraft Java Edition 1.8.x and connect to `127.0.0.1:25565`.
-
-## Expected Behavior
-
-At firmware startup, the compressed-map profile initializes PSRAM and copies
-the generated compressed chunk assets into the PSRAM runtime arena. A successful
-boot logs:
-
-```text
-compressed map psram ready chunks=<count>
-```
-
-If PSRAM initialization or compressed-map initialization fails, the firmware
-logs the failure and halts:
+如果 PSRAM 初始化或压缩地图初始化失败，固件会打印错误并停在死循环：
 
 ```text
 psram init failed; halted
 compressed map psram init failed; halted
 ```
 
-After a client joins and login enables Minecraft protocol compression, spawn
-chunks are queued from the PSRAM compressed-map runtime and sent as compressed
-Minecraft packet frames. The uncompressed fallback chunk builder remains for
-baseline firmware and for paths where protocol compression is not enabled.
+## 数据格式
 
-## Resource Impact
+生成脚本构造的 chunk body 与 fallback 路径保持一致：
 
-The following sizes were verified from the final Task 8 firmware builds with
-`size result/mc_uart_fw` on May 20, 2026:
+- packet id：`0x21`，即 Minecraft 1.8 clientbound Chunk Data。
+- chunk 坐标：3x3 spawn chunks，中心 `(0, 0)`。
+- ground-up continuous：true。
+- primary bit mask：`0x0001`，只发送一个 section。
+- block data：底层 bedrock，若干 dirt/grass，其他为空气。
+- light 和 biome：固定填充。
 
-| Firmware | text | data | bss |
-| --- | ---: | ---: | ---: |
-| `firmware-c2-legacy` | 43536 | 0 | 121100 |
-| `firmware-c2` | 45480 | 0 | 96628 |
-| `firmware-c2-aggressive` | 45480 | 0 | 96628 |
-| `log-debug` | 46312 | 0 | 96628 |
-| Delta | +1944 | 0 | -24472 |
+压缩 payload 是完整 chunk body 的 zlib 结果。发送时外层使用 Minecraft compression frame：
 
-Task 7 previously recorded baseline `text` as 44248. The final Task 8 rebuild
-produced legacy `text` 43536, so the table above uses the final build output.
-The default `firmware-c2` values match the Task 7 compressed variant
-`text 45480 / data 0 / bss 96628` verification.
+```text
+packet length VarInt
+data length VarInt = raw chunk body length
+zlib compressed chunk body
+```
 
-## Custom Maps
+小包例如 Login Success、Join Game、KeepAlive 仍可使用 `data length = 0` 的压缩 plain frame。
 
-Future custom maps should update the offline generator and map source that
-produce the generated compressed assets. Keep precompressed map payloads out of
-SRAM: generated assets may be linked for this variant, but runtime chunk storage
-must stay in PSRAM so the firmware preserves SRAM for link buffers, server
-state, and stack.
+## 资源占用
+
+不要在文档里固化某一次构建的 `text/data/bss` 数值。当前 Nix 构建会安装权威报告：
+
+```bash
+nix build .#firmware-c2
+cat result/memory-report.txt
+```
+
+报告会区分 FLASH、SRAM 和 PSRAM。PSRAM 行包含运行时 arena，例如压缩地图资产复制后的 `mc_world_compressed_total_bytes`。
+
+## 自定义地图
+
+当前地图来源写在 [scripts/generate_compressed_chunks.py](../scripts/generate_compressed_chunks.py)。要换地图，应先修改或替换该生成器，并保持以下约束：
+
+- `mc_world_compressed_asset_count` 不超过 `MC_WORLD_COMPRESSED_MAX_CHUNKS`。
+- 每个 raw body 长度不超过 `MC_MAX_PACKET_BODY`。
+- 每个 compressed payload 长度不超过 `MC_MAX_PACKET_BODY`。
+- `mc_world_compressed_total_bytes` 不超过 `platform_psram_size()`。
+- runtime chunk storage 继续放在 PSRAM，不要把大块地图数据搬回 SRAM。
+
+改完后至少运行：
+
+```bash
+nix build .#native-tests
+nix build .#firmware-c2
+```

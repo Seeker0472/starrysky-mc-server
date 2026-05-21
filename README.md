@@ -1,65 +1,129 @@
-# MC UART Server
+# StarrySky MC-Server
 
-Minimal Minecraft Java Edition 1.8.x server for StarrySky C2 using a UART byte stream.
+`starrysky-mc-server` 是一个给 StarrySky C2 板卡运行的最小 Minecraft Java Edition 1.8.x 服务器。它不是通用 Minecraft 服务端；目标是把协议、地图和传输栈压到 C2 的资源约束里，让本机 Minecraft 客户端通过串口和板卡上的固件交互。
 
-## Target
+默认发布配置面向 Minecraft Java 1.8.x / protocol 47，离线模式，单人，启用协议压缩。主机侧 Rust bridge 监听 `127.0.0.1:25565`，把 TCP 字节流转换成项目自定义的 UART link v2 帧；板卡固件在 UART0/SYS_UART/type-c 上接收桥接数据，在 UART1/HP_UART 上输出日志。
 
-- Board: StarrySky C2
-- CPU: PicoRV32 RV32IMAC, 72 MHz
-- Default bridge data link: UART0/SYS_UART/type-c at 115200 baud
-- Default log output: UART1/HP_UART at 115200 baud
-- Minecraft protocol: Java Edition 1.8.x, protocol version 47
-- Server mode: offline, no encryption, protocol compression enabled, one player
-
-## Architecture
+## 运行架构
 
 ```text
-Minecraft client
+Minecraft Java 1.8.x client
   <-> TCP 127.0.0.1:25565
-  <-> Rust bridge
-  <-> type-c serial port at 115200 baud
+  <-> bridge/mc-uart-bridge
+  <-> UART link v2 over 115200 baud serial
   <-> StarrySky C2 UART0/SYS_UART
-  <-> C server core
+  <-> firmware/main.c
+  <-> core Minecraft server
 
 Firmware logs
   -> StarrySky C2 UART1/HP_UART at 115200 baud
 ```
 
-## Commands
+核心分层：
+
+- `core/` 是平台无关 C 代码，包含 Minecraft VarInt/packet writer、服务器状态机、link codec、环形缓冲、默认世界和压缩 chunk 运行时。
+- `firmware/` 绑定 StarrySky C2 SDK，负责 UART、PSRAM、主循环、link session、日志和复位后的会话清理。
+- `bridge/` 是 Rust 主机工具，负责 TCP 监听、串口帧解码、PC-to-firmware ACK/重传、速率探测和 movement 包过滤。
+- `nix/` 是可复现构建入口，默认固件构建会生成压缩地图资产，并导出固件内存占用报告。
+
+更完整的实现说明见 [docs/README.md](docs/README.md) 和 [docs/architecture.md](docs/architecture.md)。
+
+## 目标平台与默认配置
+
+- Board：StarrySky C2。
+- CPU：PicoRV32 RV32IMAC，72 MHz。
+- 内存：片上 SRAM 128 KiB，外部 PSRAM 8 MiB。
+- 默认 bridge UART：UART0/SYS_UART/type-c，115200 baud。
+- 默认 log UART：UART1/HP_UART，115200 baud。
+- Minecraft：Java Edition 1.8.x，protocol 47。
+- 服务端模式：offline，无加密，单人。
+- 默认地图：3x3 spawn chunks，superflat 风格，离线 zlib 压缩后在启动时复制到 PSRAM。
+
+## 快速构建
+
+推荐使用 Nix：
 
 ```bash
-nix build
 nix build .#native-tests
 nix build .#bridge
-nix flake check
-nix develop
+nix build .#firmware-c2
 ```
 
-Inside `nix develop`:
-
-```bash
-make firmware
-make test-native
-make bridge
-```
-
-Firmware builds print an upstream-style memory usage table in the Nix build
-log and install the same table beside the firmware artifacts:
+常用包：
 
 ```bash
 nix build .#firmware-c2
-cat result/memory-report.txt
+nix build .#firmware-c2-aggressive
+nix build .#firmware-c2-legacy
+nix build .#log-debug
+nix build .#bridge-windows
+nix flake check
 ```
 
-The report separates FLASH, SRAM, and PSRAM. The PSRAM row includes explicit
-runtime arena usage such as the compressed-map assets copied into PSRAM at
-boot.
+也可以进入开发 shell 后使用 Make 包装命令：
 
-## UART Roles and Logging
+```bash
+nix develop
+make test-native
+make bridge
+make firmware
+```
 
-Firmware UART configuration lives in `firmware/mc_firmware_config.h`.
+固件产物在 `result/` 下：
 
-Defaults:
+- `mc_uart_fw.bin`：用于刷写的固件镜像。
+- `mc_uart_fw.elf` / `mc_uart_fw`：ELF。
+- `mc_uart_fw.hex`：HEX。
+- `mc_uart_fw.txt`：反汇编文本。
+- `memory-report.txt`：FLASH、SRAM、PSRAM 占用报告。
+
+构建与运行细节见 [docs/build-and-run.md](docs/build-and-run.md)。
+
+## 运行 Bridge
+
+Linux 示例：
+
+```bash
+mc-uart-bridge --serial /dev/ttyUSB0 --baud 115200 --listen 127.0.0.1:25565
+```
+
+Windows 示例：
+
+```powershell
+.\mc-uart-bridge.exe --serial COM5 --baud 115200 --listen 127.0.0.1:25565
+```
+
+需要导出 bridge 日志时，PowerShell 推荐把日志写到当前目录：
+
+```powershell
+$log = ".\bridge-$(Get-Date -Format yyyyMMdd-HHmmss).log"
+cmd /c ".\mc-uart-bridge.exe --serial COM5 --baud 115200 --listen 127.0.0.1:25565 --verbose 2>&1" | Tee-Object -FilePath $log
+```
+
+启动 Minecraft Java Edition 1.8.x，添加服务器 `127.0.0.1:25565`。
+
+## 协议和传输
+
+Minecraft 层：
+
+- 握手和 Status 请求使用普通 Minecraft frame。
+- Login 阶段默认先发送 `Set Compression`，再发送压缩格式的 `Login Success`。
+- Play 阶段发送 Join Game、Spawn Position、Time、Health、Player Position And Look、spawn chunks 和 KeepAlive。
+- KeepAlive id 每次递增；客户端 ACK 只用于诊断，固件不会因为 missed keepalive 主动踢出玩家。
+
+UART link v2：
+
+- 帧体包含 version、type、flags、seq、ack、payload length、payload 和 CRC16。
+- 整帧用 COBS 编码，并以 `0x00` 分隔。
+- PC-to-firmware DATA 使用 stop-and-wait、ACK、绝对 credit 和超时重传。
+- Firmware-to-PC DATA 当前不做 ACK；bridge 遇到解码、CRC 或 `DATA_M2C sequence mismatch` 会退出，让链路损坏在测试时显性暴露。
+- Bridge 会丢弃 Minecraft 1.8 serverbound movement 包，避免客户端空闲移动上报填满低速 UART；KeepAlive 回复和非 movement 包会继续转发。
+
+自定义 UART link v2 的完整格式见 [docs/protocol/uart-link-v2.md](docs/protocol/uart-link-v2.md)。协议来源和具体选择见 [docs/protocol/references.md](docs/protocol/references.md)。
+
+## UART 与日志
+
+固件 UART 配置在 [firmware/mc_firmware_config.h](firmware/mc_firmware_config.h)：
 
 ```c
 #define MC_UART0_BAUD 115200u
@@ -69,99 +133,21 @@ Defaults:
 #define MC_LOG_LEVEL MC_LOG_INFO
 ```
 
-`MC_BRIDGE_UART_ID` and `MC_LOG_UART_ID` must be different so firmware logs never share the bridge data link. To reverse the UART responsibilities, set `MC_BRIDGE_UART_ID` to `MC_UART_ID_1` and `MC_LOG_UART_ID` to `MC_UART_ID_0` in a local development override.
+`MC_BRIDGE_UART_ID` 和 `MC_LOG_UART_ID` 必须不同，避免日志字节污染 bridge 数据链路。
 
-Firmware logging supports `MC_LOG_OFF`, `MC_LOG_INFO`, `MC_LOG_DEBUG`, and `MC_LOG_TRACE`. `INFO` logs boot, link, state, and error events; `DEBUG` adds more detailed packet and byte-flow diagnostics; `TRACE` adds raw received data dumps.
+日志级别：
 
-The maintained debug firmware keeps the default compressed-map PSRAM profile and selects `MC_LOG_DEBUG`:
+- `MC_LOG_OFF`：关闭日志。
+- `MC_LOG_INFO`：启动、登录、连接复位和关键错误。
+- `MC_LOG_DEBUG`：额外的帧、KeepAlive、回压和链路诊断。
+- `MC_LOG_TRACE`：原始数据 dump，仅用于短时诊断，可能改变串口时序。
+
+`log-debug` 包使用默认压缩地图 PSRAM 配置，并把固件日志级别设为 `MC_LOG_DEBUG`：
 
 ```bash
 nix build .#log-debug
 ```
 
-## Reference Policy
+## 参考来源
 
-Do not guess board registers, UART status bits, memory ranges, Minecraft packet IDs, packet fields, or chunk layouts. Check `docs/protocol/references.md` before changing those areas.
-
-## Flashing
-
-Automatic flashing is not part of this project. The build produces firmware artifacts only.
-
-## Running the Bridge
-
-The bridge and firmware use UART link protocol V2. V2 frames are COBS-encoded
-and terminated with `0x00`, so corrupted frames are discarded at the next
-delimiter. PC-to-firmware DATA frames use stop-and-wait ACK/retransmission and
-absolute ACK credit. Firmware-to-PC DATA frames are not ACKed in this version;
-the bridge treats any decode, CRC, or DATA_M2C sequence error as fatal and exits
-so link corruption is visible during testing.
-
-The default `firmware-c2` package uses Minecraft protocol compression, offline
-precompressed spawn chunks, and PSRAM runtime chunk storage. Build
-`firmware-c2-legacy` only when you need the old SRAM map fallback.
-
-After the bootstrap chunks are queued, the firmware sends Play KeepAlive
-packets on a fixed interval. KeepAlive ids advance each interval; replies clear
-the pending marker for diagnostics, but the firmware does not disconnect the
-Minecraft session for missed replies. Reset the board when you need to force a
-fresh server session.
-
-MCU-to-PC firmware transmit is conservative by default. Build
-`firmware-c2-aggressive` to use the validated MCU-to-PC aggressive profile; it
-keeps the stable frame size, TX budget, UART burst, and 115200 baud, and lowers
-only UART0 TX pacing.
-
-PC-to-firmware traffic remains conservative. It calibrates per-byte pacing with
-RATE_PROBE frames, waits for the link to settle, warms up at the slowest profile,
-then requires three formal probes per profile. A 3/3 profile is stable; a 2/3
-profile is treated as borderline and stops probing. Real DATA is written one
-byte at a time using one supported profile slower than the fastest stable or
-borderline result, and downshifts on retransmit timeouts.
-
-The bridge drops Minecraft 1.8 serverbound movement packets before forwarding
-PC-to-firmware DATA so idle movement spam cannot fill the UART link. KeepAlive
-responses and other serverbound packets are preserved.
-
-The default bridge UART baud remains 115200 for conservative bring-up and for
-the validated aggressive profile. If you build custom firmware with a different
-`MC_UART0_BAUD` or `MC_UART1_BAUD`, run the bridge with the matching `--baud`
-value.
-
-```bash
-nix build .#firmware-c2
-nix build .#firmware-c2-legacy
-nix build .#firmware-c2-aggressive
-nix build .#log-debug
-```
-
-Use `log-debug` firmware for gameplay tests that need firmware diagnostics.
-`MC_LOG_TRACE` is intended only for short local diagnostics because raw frame
-dumps can slow the firmware main loop enough to change UART timing.
-
-Linux example:
-
-```bash
-mc-uart-bridge --serial /dev/ttyUSB0 --baud 115200 --listen 127.0.0.1:25565
-```
-
-Windows example:
-
-```powershell
-mc-uart-bridge.exe --serial COM3 --baud 115200 --listen 127.0.0.1:25565
-```
-
-During MCU-to-PC testing, a bridge exit with a serial decode error, CRC error,
-or `DATA_M2C sequence mismatch` means the link lost or corrupted bytes.
-
-The bridge waits `1000ms` before retransmitting unacknowledged PC-to-firmware
-DATA by default. Use `--c2m-retransmit-timeout-ms` only when intentionally
-testing PC-to-firmware behavior; the stable and aggressive firmware profiles do
-not require changing it.
-
-Build a Windows bridge executable from Nix on Linux:
-
-```bash
-nix build .#bridge-windows
-```
-
-Start Minecraft Java Edition 1.8.x and add server `127.0.0.1:25565`.
+Minecraft 1.8、StarrySky C2、ECOS SDK 和本项目协议选择的来源见 [docs/protocol/references.md](docs/protocol/references.md)。
