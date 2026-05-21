@@ -18,7 +18,7 @@ use crate::session::{
 use crate::test_support::{FakeSerialPort, WriteAction};
 use crate::Args;
 use clap::Parser;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
@@ -113,6 +113,23 @@ fn hex_preview_truncates_long_buffers() {
 }
 
 #[test]
+fn small_packet_preview_formats_short_minecraft_frames() {
+    assert_eq!(
+        crate::session::small_packet_preview("m2c", &[0x03, 0x00, 0x00, 0x01]),
+        Some("m2c tcp payload len=4 data=03 00 00 01".to_string())
+    );
+    assert_eq!(
+        crate::session::small_packet_preview("c2m", &[0x03, 0x00, 0x00, 0x01]),
+        Some("c2m tcp payload len=4 data=03 00 00 01".to_string())
+    );
+}
+
+#[test]
+fn small_packet_preview_skips_large_frames() {
+    assert!(crate::session::small_packet_preview("m2c", &[0u8; 65]).is_none());
+}
+
+#[test]
 fn c2m_sender_keeps_payload_until_ack_advances() {
     let mut sender = C2mSender::new(497, 512);
     sender.push_tcp_bytes(b"abc");
@@ -123,6 +140,81 @@ fn c2m_sender_keeps_payload_until_ack_advances() {
     sender.mark_sent(&frame).unwrap();
     sender.handle_ack(1, 509).unwrap();
     assert_eq!(sender.pending_tcp_len(), 0);
+}
+
+#[test]
+fn c2m_sender_filters_serverbound_player_movement_packets() {
+    let mut sender = C2mSender::new(497, 512);
+
+    sender.push_filtered_tcp_bytes(&[0x03, 0x00, 0x03, 0x00]);
+
+    assert_eq!(sender.pending_tcp_len(), 0);
+    assert!(sender.next_frame_to_send().unwrap().is_none());
+}
+
+#[test]
+fn c2m_sender_keeps_keepalive_packets_when_filtering_movement() {
+    let mut sender = C2mSender::new(497, 512);
+
+    sender.push_filtered_tcp_bytes(&[
+        0x03, 0x00, 0x03, 0x00, // Player/onGround, movement noise.
+        0x03, 0x00, 0x00, 0x02, // KeepAlive response id=2.
+    ]);
+
+    assert_eq!(sender.pending_tcp_len(), 4);
+    let frame = sender.next_frame_to_send().unwrap().unwrap();
+    assert_eq!(frame.payload, vec![0x03, 0x00, 0x00, 0x02]);
+}
+
+#[test]
+fn c2m_sender_filters_position_and_look_packets() {
+    let mut sender = C2mSender::new(497, 512);
+    let position = [
+        0x1b, 0x00, 0x04, 0xbf, 0xe4, 0x2e, 0x36, 0xd9, 0xc0, 0xce, 0xfa, 0xc0, 0x27, 0x80,
+        0x36, 0x9e, 0x13, 0x19, 0x55, 0x3f, 0xb7, 0x26, 0x05, 0xac, 0xfb, 0x22, 0xc0, 0x00,
+    ];
+    let position_look = [
+        0x23, 0x00, 0x06, 0xbf, 0xe4, 0x2e, 0x36, 0xd9, 0xc0, 0xce, 0xfa, 0xc0, 0x27, 0x80,
+        0x36, 0x9e, 0x13, 0x19, 0x55, 0x3f, 0xb7, 0x26, 0x05, 0xac, 0xfb, 0x22, 0xc0, 0xc1,
+        0x79, 0x99, 0x98, 0xbe, 0x19, 0x99, 0x93, 0x00,
+    ];
+
+    sender.push_filtered_tcp_bytes(&position);
+    sender.push_filtered_tcp_bytes(&position_look);
+
+    assert_eq!(sender.pending_tcp_len(), 0);
+}
+
+#[test]
+fn c2m_sender_preserves_non_movement_packets_around_filtered_packets() {
+    let mut sender = C2mSender::new(497, 512);
+
+    sender.push_filtered_tcp_bytes(&[
+        0x03, 0x00, 0x03, 0x00, // Player/onGround.
+        0x02, 0x00, 0x0a, // Non-movement packet.
+        0x03, 0x00, 0x00, 0x02, // KeepAlive response.
+    ]);
+
+    let frame = sender.next_frame_to_send().unwrap().unwrap();
+    assert_eq!(
+        frame.payload,
+        vec![0x02, 0x00, 0x0a, 0x03, 0x00, 0x00, 0x02]
+    );
+}
+
+#[test]
+fn c2m_sender_waits_for_complete_minecraft_frame_before_filtering() {
+    let mut sender = C2mSender::new(497, 512);
+
+    sender.push_filtered_tcp_bytes(&[0x03, 0x00]);
+    assert_eq!(sender.pending_tcp_len(), 0);
+    assert!(sender.next_frame_to_send().unwrap().is_none());
+
+    sender.push_filtered_tcp_bytes(&[0x00, 0x02]);
+
+    assert_eq!(sender.pending_tcp_len(), 4);
+    let frame = sender.next_frame_to_send().unwrap().unwrap();
+    assert_eq!(frame.payload, vec![0x03, 0x00, 0x00, 0x02]);
 }
 
 #[test]
@@ -888,6 +980,54 @@ fn run_link_client_returns_invalid_data_on_m2c_sequence_mismatch() {
         err.to_string(),
         "DATA_M2C sequence mismatch expected=0 got=1"
     );
+}
+
+#[test]
+fn run_link_client_filters_movement_before_writing_c2m_to_serial() {
+    let ready_payload = [
+        0xf1, 0x01, 0x00, 0x02, 0xf0, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut serial = FakeSerialPort::new([])
+        .with_readable(p0_rate_probe_acks())
+        .with_auto_reset_ready(&ready_payload)
+        .with_empty_read_error(io::ErrorKind::BrokenPipe);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(addr).unwrap();
+    client
+        .write_all(&[
+            0x03, 0x00, 0x03, 0x00, // Player/onGround.
+            0x03, 0x00, 0x00, 0x02, // KeepAlive response.
+        ])
+        .unwrap();
+    drop(client);
+    let (server, _) = listener.accept().unwrap();
+    let log = BridgeLog { verbose: false };
+
+    run_link_client(
+        server,
+        &mut serial,
+        log,
+        Duration::from_millis(DEFAULT_C2M_RETRANSMIT_TIMEOUT_MS),
+    )
+    .unwrap();
+
+    let mut decoder = link::Decoder::new();
+    let c2m_frames: Vec<_> = decoder
+        .feed(&serial.written)
+        .into_iter()
+        .filter_map(|event| match event {
+            link::DecodeEvent::Frame(frame)
+                if frame.frame_type == link::FrameType::DataC2m =>
+            {
+                Some(frame)
+            }
+            link::DecodeEvent::Frame(_) => None,
+            link::DecodeEvent::Error(error) => panic!("decode error: {error:?}"),
+        })
+        .collect();
+    assert_eq!(c2m_frames.len(), 1);
+    assert_eq!(c2m_frames[0].payload, vec![0x03, 0x00, 0x00, 0x02]);
 }
 
 #[test]

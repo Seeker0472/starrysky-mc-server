@@ -25,6 +25,18 @@ pub(crate) enum SerialDrain {
     Reset,
 }
 
+pub(crate) fn small_packet_preview(direction: &str, payload: &[u8]) -> Option<String> {
+    const MAX_SMALL_PACKET_BYTES: usize = 64;
+    if payload.len() > MAX_SMALL_PACKET_BYTES {
+        return None;
+    }
+    Some(format!(
+        "{direction} tcp payload len={} data={}",
+        payload.len(),
+        hex_preview(payload)
+    ))
+}
+
 pub(crate) fn accept_m2c_sequence(
     frame: &link::Frame,
     expected: &mut u16,
@@ -109,6 +121,9 @@ pub(crate) fn handle_serial_frame(
             if let Err(e) = tcp.write_all(&frame.payload) {
                 let _ = send_link_reset(serial, log);
                 return Err(e);
+            }
+            if let Some(preview) = small_packet_preview("m2c", &frame.payload) {
+                log.debug(preview);
             }
             *serial_to_tcp_total += frame.payload.len();
             log.debug(format_args!(
@@ -445,7 +460,19 @@ pub(crate) fn run_link_client(
                 }
                 Ok(n) => {
                     tcp_read_total += n;
-                    c2m_sender.push_tcp_bytes(&tcp_buf[..n]);
+                    let filter_stats = c2m_sender.push_filtered_tcp_bytes(&tcp_buf[..n]);
+                    if let Some(preview) = small_packet_preview("c2m", &tcp_buf[..n]) {
+                        log.debug(preview);
+                    }
+                    if filter_stats.dropped_movement_frames > 0 {
+                        log.debug(format_args!(
+                            "C2M filtered movement frames={} forwarded_bytes={} buffered_bytes={} pending={}",
+                            filter_stats.dropped_movement_frames,
+                            filter_stats.forwarded_bytes,
+                            filter_stats.buffered_bytes,
+                            c2m_sender.pending_tcp_len()
+                        ));
+                    }
                     log.debug(format_args!(
                         "tcp read bytes={n} pending={} total_in={}",
                         c2m_sender.pending_tcp_len(),

@@ -4,6 +4,9 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
+const MINECRAFT_VARINT_MAX_BYTES: usize = 5;
+const MINECRAFT_FRAME_LENGTH_LIMIT: usize = 8192;
+
 pub(crate) struct OutstandingC2m {
     pub(crate) seq: u16,
     pub(crate) payload_len: usize,
@@ -14,6 +17,7 @@ pub(crate) struct OutstandingC2m {
 
 pub(crate) struct C2mSender {
     pub(crate) pending_tcp: VecDeque<u8>,
+    pub(crate) minecraft_frame_buffer: Vec<u8>,
     pub(crate) outstanding: Option<OutstandingC2m>,
     pub(crate) next_seq: u16,
     pub(crate) negotiated_payload: usize,
@@ -24,6 +28,7 @@ impl C2mSender {
     pub(crate) fn new(negotiated_payload: usize, credit: u16) -> Self {
         Self {
             pending_tcp: VecDeque::new(),
+            minecraft_frame_buffer: Vec::new(),
             outstanding: None,
             next_seq: 0,
             negotiated_payload,
@@ -33,6 +38,11 @@ impl C2mSender {
 
     pub(crate) fn push_tcp_bytes(&mut self, data: &[u8]) {
         self.pending_tcp.extend(data);
+    }
+
+    pub(crate) fn push_filtered_tcp_bytes(&mut self, data: &[u8]) -> C2mFilterStats {
+        self.minecraft_frame_buffer.extend_from_slice(data);
+        self.drain_filtered_minecraft_frames()
     }
 
     pub(crate) fn pending_tcp_len(&self) -> usize {
@@ -156,6 +166,108 @@ impl C2mSender {
             .min(self.credit as usize);
         (payload_len > 0).then_some(payload_len)
     }
+
+    fn drain_filtered_minecraft_frames(&mut self) -> C2mFilterStats {
+        let mut stats = C2mFilterStats::default();
+
+        loop {
+            let frame_len = match read_minecraft_varint(&self.minecraft_frame_buffer) {
+                VarIntRead::Complete(value, width) => {
+                    if value > MINECRAFT_FRAME_LENGTH_LIMIT {
+                        self.forward_buffer_fail_open(&mut stats);
+                        break;
+                    }
+                    let Some(total_len) = width.checked_add(value) else {
+                        self.forward_buffer_fail_open(&mut stats);
+                        break;
+                    };
+                    if self.minecraft_frame_buffer.len() < total_len {
+                        break;
+                    }
+                    total_len
+                }
+                VarIntRead::Incomplete => break,
+                VarIntRead::Invalid => {
+                    self.forward_buffer_fail_open(&mut stats);
+                    break;
+                }
+            };
+
+            if should_forward_minecraft_frame(&self.minecraft_frame_buffer[..frame_len]) {
+                self.pending_tcp
+                    .extend(self.minecraft_frame_buffer[..frame_len].iter().copied());
+                stats.forwarded_bytes += frame_len;
+            } else {
+                stats.dropped_movement_frames += 1;
+            }
+            self.minecraft_frame_buffer.drain(..frame_len);
+        }
+
+        stats.buffered_bytes = self.minecraft_frame_buffer.len();
+        stats
+    }
+
+    fn forward_buffer_fail_open(&mut self, stats: &mut C2mFilterStats) {
+        stats.forwarded_bytes += self.minecraft_frame_buffer.len();
+        self.pending_tcp
+            .extend(self.minecraft_frame_buffer.drain(..));
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct C2mFilterStats {
+    pub(crate) forwarded_bytes: usize,
+    pub(crate) dropped_movement_frames: usize,
+    pub(crate) buffered_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarIntRead {
+    Complete(usize, usize),
+    Incomplete,
+    Invalid,
+}
+
+fn read_minecraft_varint(bytes: &[u8]) -> VarIntRead {
+    let mut value = 0usize;
+
+    for (index, byte) in bytes.iter().take(MINECRAFT_VARINT_MAX_BYTES).enumerate() {
+        value |= usize::from(byte & 0x7f) << (7 * index);
+        if byte & 0x80 == 0 {
+            return VarIntRead::Complete(value, index + 1);
+        }
+    }
+
+    if bytes.len() < MINECRAFT_VARINT_MAX_BYTES {
+        VarIntRead::Incomplete
+    } else {
+        VarIntRead::Invalid
+    }
+}
+
+fn should_forward_minecraft_frame(frame: &[u8]) -> bool {
+    let VarIntRead::Complete(packet_len, packet_len_width) = read_minecraft_varint(frame) else {
+        return true;
+    };
+    if frame.len() != packet_len_width + packet_len {
+        return true;
+    }
+
+    let body = &frame[packet_len_width..];
+    let VarIntRead::Complete(uncompressed_len, uncompressed_len_width) =
+        read_minecraft_varint(body)
+    else {
+        return true;
+    };
+    if uncompressed_len != 0 {
+        return true;
+    }
+
+    let packet = &body[uncompressed_len_width..];
+    let VarIntRead::Complete(packet_id, _) = read_minecraft_varint(packet) else {
+        return true;
+    };
+    !matches!(packet_id, 0x03..=0x06)
 }
 
 pub(crate) fn handle_ack_c2m(sender: &mut C2mSender, frame: &link::Frame) -> io::Result<()> {
