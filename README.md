@@ -2,6 +2,9 @@
 
 `starrysky-mc-server` 是一个给 StarrySky C2 板卡运行的最小 Minecraft Java Edition 1.8.x 服务器。它不是通用 Minecraft 服务端；目标是把协议、地图和传输栈压到 C2 的资源约束里，让本机 Minecraft 客户端通过串口和板卡上的固件交互。
 
+> [!IMPORTANT]
+> 本项目是非官方项目，也未获得 Mojang 或 Microsoft 的认可、赞助或关联。请仅使用已合法购买的 Minecraft Java Edition 客户端进行本地测试；本仓库不包含 Minecraft 官方服务端、客户端、材质、音频或其他游戏资产。
+
 默认发布配置面向 Minecraft Java 1.8.x / protocol 47，离线模式，单人，启用协议压缩。主机侧 Rust bridge 监听 `127.0.0.1:25565`，把 TCP 字节流转换成项目自定义的 UART link v2 帧；板卡固件在 UART0/SYS_UART/type-c 上接收桥接数据，在 UART1/HP_UART 上输出日志。
 
 ![Minecraft 1.8.1 连接 StarrySky C2 固件服务器后的展示地图](docs/assets/minecraft-demo.png)
