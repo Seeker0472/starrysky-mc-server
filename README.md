@@ -66,6 +66,15 @@ nix build .#bridge-windows
 nix flake check
 ```
 
+Linux 直连服务端会直接在 Linux userspace 运行 `core/`，绕过 Rust bridge、UART link 和 C2 固件，适合 x86-64 Linux 本地测试，也为后续 Chiplab Linux userspace 演示保留同一入口：
+
+```bash
+nix build .#linux-server
+./result/bin/mc-linux-server --listen 127.0.0.1:25565
+```
+
+启动 Minecraft Java Edition 1.8.x，添加服务器 `127.0.0.1:25565`。该模式默认启用协议压缩和 showcase 压缩地图。
+
 也可以进入开发 shell 后使用 Make 包装命令：
 
 ```bash

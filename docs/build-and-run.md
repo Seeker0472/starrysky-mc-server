@@ -107,6 +107,36 @@ nix develop
 make bridge
 ```
 
+## Linux 直连服务端构建
+
+Linux 直连服务端是一个最小 userspace 入口，把 Minecraft TCP socket 直接接到 `core/` 服务端。它不打开串口，不启动 Rust bridge，也不使用 UART link v2；C2 固件构建和原来的 bridge 串口流程不受影响。
+
+构建并监听本机：
+
+```bash
+nix build .#linux-server
+./result/bin/mc-linux-server --listen 127.0.0.1:25565
+```
+
+该 profile 默认使用：
+
+```text
+MC_PROTOCOL_COMPRESSION_ENABLE=1
+MC_USE_PSRAM_COMPRESSED_MAP=1
+MC_COMPRESSION_THRESHOLD=8192u
+```
+
+构建阶段会运行 `scripts/generate_compressed_chunks.py`，并把生成的 C 资产链接进二进制。运行时不需要 Python、zlib、地图文件、串口设备或 bridge。
+
+常用选项：
+
+```bash
+./result/bin/mc-linux-server --listen 0.0.0.0:25565
+./result/bin/mc-linux-server --listen 127.0.0.1:25565 --verbose
+```
+
+它仍是单人 offline 服务端，同一时间只接受一个 TCP 客户端，断开后会回到监听状态。要在 StarrySky C2 板卡上运行，请继续使用固件 + bridge 的串口流程。
+
 ## 连接和运行
 
 1. 刷写 `firmware-c2` 或 `log-debug`。
