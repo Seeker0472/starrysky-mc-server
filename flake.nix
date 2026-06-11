@@ -40,6 +40,52 @@
                 || base == "target");
           };
 
+          linuxServerSrc = lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              let
+                root = toString ./.;
+                pathString = toString path;
+                rel =
+                  if pathString == root
+                  then ""
+                  else lib.removePrefix (root + "/") pathString;
+              in
+                (type == "directory" && builtins.elem rel [
+                  ""
+                  "core"
+                  "core/include"
+                  "core/src"
+                  "core/generated"
+                  "linux"
+                  "maps"
+                  "scripts"
+                ])
+                || builtins.elem rel [
+                  "linux/mc_linux_server.c"
+                  "core/include/mc_commands.h"
+                  "core/include/mc_config.h"
+                  "core/include/mc_packet.h"
+                  "core/include/mc_ringbuf.h"
+                  "core/include/mc_server.h"
+                  "core/include/mc_varint.h"
+                  "core/include/mc_world.h"
+                  "core/include/mc_world_compressed.h"
+                  "core/src/mc_ringbuf.c"
+                  "core/src/mc_varint.c"
+                  "core/src/mc_packet.c"
+                  "core/src/mc_commands.c"
+                  "core/src/mc_world.c"
+                  "core/src/mc_world_compressed.c"
+                  "core/src/mc_server.c"
+                  "core/generated/mc_world_compressed_assets.c"
+                  "core/generated/mc_world_compressed_assets.h"
+                  "scripts/generate_compressed_chunks.py"
+                  "maps/showcase.png"
+                  "maps/showcase.palette.json"
+                ];
+          };
+
           sdk = pkgs.callPackage ./nix/ecos-sdk.nix {
             src = embedded-sdk;
           };
@@ -90,6 +136,9 @@
           native-tests = pkgs.callPackage ./nix/native-tests.nix {
             src = projectSrc;
           };
+          linux-server = pkgs.callPackage ./nix/linux-server.nix {
+            src = linuxServerSrc;
+          };
           bridge = pkgs.callPackage ./nix/bridge.nix {
             src = projectSrc;
           };
@@ -101,6 +150,7 @@
 
       checks = forAllSystems (system: {
         native-tests = self.packages.${system}.native-tests;
+        linux-server = self.packages.${system}.linux-server;
         bridge = self.packages.${system}.bridge;
         bridge-windows = self.packages.${system}.bridge-windows;
         firmware-c2 = self.packages.${system}.firmware-c2;

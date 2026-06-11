@@ -1,4 +1,4 @@
-.PHONY: firmware firmware-legacy firmware-aggressive firmware-log-debug test-native bridge check clean
+.PHONY: firmware firmware-legacy firmware-aggressive firmware-log-debug test-native linux-server bridge check clean
 
 firmware:
 	nix build .#firmware-c2
@@ -14,6 +14,9 @@ firmware-log-debug:
 
 test-native:
 	nix build .#native-tests
+
+linux-server:
+	nix build .#linux-server
 
 bridge:
 	nix build .#bridge
